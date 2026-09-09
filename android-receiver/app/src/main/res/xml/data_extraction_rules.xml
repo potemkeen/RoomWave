@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <!-- A transferred identity must not make two phones appear as the same receiver. -->
+    <cloud-backup>
+        <exclude domain="sharedpref" path="roomwave.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="roomwave.xml" />
+    </device-transfer>
+</data-extraction-rules>
