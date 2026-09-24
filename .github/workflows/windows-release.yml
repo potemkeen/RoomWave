@@ -34,9 +34,9 @@ jobs:
           $version=(Get-Content windows-host/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid version' }
           $npm=(Get-Content windows-host/package.json -Raw | ConvertFrom-Json).version
-          $lock=(Get-Content windows-host/package-lock.json -Raw | ConvertFrom-Json).version
+          $lock=(Get-Content windows-host/package-lock.json -Raw | ConvertFrom-Json -AsHashtable).version
           $cargo=Get-Content windows-host/src-tauri/Cargo.toml -Raw
-          if ($npm -ne $version -or $lock -ne $version -or $cargo -notmatch ('(?m)^version = "'+[regex]::Escape($version)+'"$')) { throw 'Host versions disagree' }
+          if ($npm -ne $version -or $lock -ne $version -or $cargo -notmatch ('(?m)^version = "'+[regex]::Escape($version)+'"\r?$')) { throw 'Host versions disagree' }
           if ($env:BUILD_REF.StartsWith('refs/tags/') -and $env:BUILD_TAG -ne "windows-v$version") { throw 'Tag must match host version' }
           "version=$version" >> $env:GITHUB_OUTPUT
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
