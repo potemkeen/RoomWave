@@ -11,7 +11,11 @@ fn fill(data: &mut [u8], channels: usize, selected: usize, first: u64, speaker: 
 }
 
 pub fn play(speaker: u32) -> Result<(), String> {
-    fn run(speaker: u32) -> Result<(), Box<dyn std::error::Error>> {
+    play_on_endpoint(None, speaker)
+}
+
+pub fn play_on_endpoint(endpoint: Option<&str>, speaker: u32) -> Result<(), String> {
+    fn run(endpoint: Option<&str>, speaker: u32) -> Result<(), Box<dyn std::error::Error>> {
         wasapi::initialize_mta().ok()?;
         struct Com;
         impl Drop for Com {
@@ -20,7 +24,12 @@ pub fn play(speaker: u32) -> Result<(), String> {
             }
         }
         let _com = Com;
-        let device = DeviceEnumerator::new()?.get_default_device(&Direction::Render)?;
+        let enumerator = DeviceEnumerator::new()?;
+        let device = if let Some(id) = endpoint {
+            enumerator.get_device(id)?
+        } else {
+            enumerator.get_default_device(&Direction::Render)?
+        };
         let (layout, _) = read_endpoint(&device.get_id()?)?;
         if let Some(error) = layout.error {
             return Err(error.into());
@@ -93,7 +102,7 @@ pub fn play(speaker: u32) -> Result<(), String> {
         stopped?;
         Ok(())
     }
-    run(speaker).map_err(|e| e.to_string())
+    run(endpoint, speaker).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

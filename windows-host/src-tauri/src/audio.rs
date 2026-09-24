@@ -8,16 +8,16 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpStream, UdpSocket},
     sync::{
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
-#[path = "local_output.rs"]
-mod local_output;
+#[path = "audio_backend/mod.rs"]
+mod backend;
+use backend::{capture_audio, local_output};
 pub use local_output::Config as LocalOutputConfig;
 
 const FRAMES: usize = 240;
@@ -35,16 +35,22 @@ pub struct ReceiverState {
     pub packets_sent: u64,
     pub receiver_packets: u64,
     pub receiver_lost: u64,
+    pub last_report_unix_ms: Option<u64>,
     pub latency_ms: Option<f64>,
     pub rtt_ms: Option<f64>,
     pub sync_error_ms: Option<f64>,
     pub sync_status: String,
     pub stages: Value,
+    pub transport: Value,
+    pub low_rate_supported: bool,
     pub error: Option<String>,
 }
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioState {
+    pub stream_mode: String,
+    pub mode_revision: u64,
+    pub mode_changed_unix_ms: u64,
     pub output_name: Option<String>,
     pub peak: f32,
     pub target_delay_ms: u32,
@@ -56,6 +62,7 @@ pub struct AudioState {
     pub local_config: LocalOutputConfig,
     pub local_output: local_output::State,
     pub windows_outputs: Vec<local_output::Endpoint>,
+    pub host_metrics: Value,
 }
 #[derive(Default)]
 struct HubState {
@@ -68,6 +75,15 @@ struct HubState {
 }
 #[derive(Default)]
 struct Hub {
+    managed_source: Option<String>,
+    capture_ready: AtomicBool,
+    mode: AtomicU64,
+    mode_changed_unix_ms: AtomicU64,
+    subscriber_drops: AtomicU64,
+    subscriber_drops_by_device: Mutex<BTreeMap<String, u64>>,
+    capture_trimmed_frames: AtomicU64,
+    capture_stages: Mutex<Value>,
+    timeline_skipped_frames: AtomicU64,
     local_config: Mutex<LocalOutputConfig>,
     local_state: Mutex<local_output::State>,
     windows_outputs: Mutex<Vec<local_output::Endpoint>>,
@@ -81,12 +97,38 @@ struct Hub {
 }
 impl Hub {
     fn delay(&self) -> i64 {
-        self.delay_ns.load(Ordering::Relaxed).max(PLAYOUT_NS / 2)
+        self.delay_ns.load(Ordering::Relaxed).max(10_000_000)
+    }
+    fn admit_peer(
+        &self,
+        id: &str,
+        tx: &SyncSender<Arc<AudioBlock>>,
+        clocks_ready: bool,
+    ) -> Res<bool> {
+        if !clocks_ready {
+            return Ok(false);
+        }
+        let mut subscribers = self.subscribers.lock().map_err(|e| e.to_string())?;
+        if subscribers.is_empty() {
+            self.delay_ns.fetch_max(PLAYOUT_NS, Ordering::Relaxed);
+        }
+        if !startup_budget_ready(self.delay()) {
+            return Ok(false);
+        }
+        subscribers.insert(id.to_owned(), tx.clone());
+        Ok(true)
     }
     fn publish(&self, block: Arc<AudioBlock>) {
         if let Ok(mut subscribers) = self.subscribers.lock() {
-            subscribers.retain(|_, tx| match tx.try_send(block.clone()) {
-                Ok(()) | Err(TrySendError::Full(_)) => true,
+            subscribers.retain(|id, tx| match tx.try_send(block.clone()) {
+                Ok(()) => true,
+                Err(TrySendError::Full(_)) => {
+                    self.subscriber_drops.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut counts) = self.subscriber_drops_by_device.lock() {
+                        *counts.entry(id.clone()).or_default() += 1;
+                    }
+                    true
+                }
                 Err(TrySendError::Disconnected(_)) => false,
             });
         }
@@ -117,6 +159,13 @@ pub struct AudioSession {
 }
 impl AudioSession {
     pub fn set_local_output(&self, config: LocalOutputConfig) -> Result<(), String> {
+        if let Some(source) = &self.hub.managed_source {
+            if config.source_id.as_ref() != Some(source)
+                || config.output_id.as_ref() == Some(source)
+            {
+                return Err("RoomWave Virtual Speakers используется только как источник; выберите отдельный выход ПК.".into());
+            }
+        }
         if config.enabled
             && (config.source_id.is_none()
                 || config.output_id.is_none()
@@ -156,14 +205,25 @@ impl AudioSession {
         state.test = Some((speaker, 0));
         Ok(LocalTestGuard(self.hub.clone()))
     }
-    pub fn new() -> Self {
+    pub fn new(virtual_audio: &crate::default_output::Status) -> Self {
+        let saved = std::fs::read(local_output::config_path())
+            .ok()
+            .and_then(|b| serde_json::from_slice::<LocalOutputConfig>(&b).ok());
+        let first_run = saved.is_none();
+        let mut config = saved.unwrap_or_default();
+        if let Some(source) = &virtual_audio.endpoint_id {
+            config.source_id = Some(source.clone());
+            if config.output_id.is_none() || config.output_id.as_ref() == Some(source) {
+                config.output_id = virtual_audio.previous_output_id.clone();
+            }
+            if first_run {
+                config.enabled = config.output_id.is_some();
+                config.speakers = vec![1, 2, 4];
+            }
+        }
         let hub = Arc::new(Hub {
-            local_config: Mutex::new(
-                std::fs::read(local_output::config_path())
-                    .ok()
-                    .and_then(|b| serde_json::from_slice(&b).ok())
-                    .unwrap_or_default(),
-            ),
+            managed_source: virtual_audio.endpoint_id.clone(),
+            local_config: Mutex::new(config),
             delay_ns: AtomicI64::new(PLAYOUT_NS),
             assignments: Mutex::new(
                 std::fs::read(assignments_path())
@@ -186,6 +246,15 @@ impl AudioSession {
                 ..Default::default()
             }),
         }
+    }
+    pub fn wait_for_capture(&self) -> bool {
+        for _ in 0..60 {
+            if self.hub.capture_ready.load(Ordering::Acquire) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        false
     }
     pub fn set_channel(&self, id: String, speaker: Option<u32>) -> Result<(), String> {
         if let Some(s) = speaker {
@@ -228,7 +297,12 @@ impl AudioSession {
             .values()
             .map(|p| p.state.lock().map(|s| s.clone()).map_err(|e| e.to_string()))
             .collect::<Result<Vec<_>, _>>()?;
+        let mode = self.hub.mode.load(Ordering::Acquire);
         Ok(AudioState {
+            stream_mode: if mode & 1 == 0 { "quality" } else { "latency" }.into(),
+            mode_revision: mode >> 1,
+            mode_changed_unix_ms: self.hub.mode_changed_unix_ms.load(Ordering::Relaxed),
+            host_metrics: json!({"captureStages":self.hub.capture_stages.lock().map_err(|e| e.to_string())?.clone(),"pipelinePolicy":"pcm48-prepared-join-v2","subscriberQueueDropsByDevice":self.hub.subscriber_drops_by_device.lock().map_err(|e| e.to_string())?.clone(),"subscriberQueueDrops":self.hub.subscriber_drops.load(Ordering::Relaxed),"captureTrimmedFrames":self.hub.capture_trimmed_frames.load(Ordering::Relaxed),"timelineSkippedFrames":self.hub.timeline_skipped_frames.load(Ordering::Relaxed)}),
             output_name: hub.output_name.clone(),
             peak: hub.peak,
             target_delay_ms: (self.hub.delay() / 1_000_000) as u32,
@@ -309,11 +383,6 @@ impl AudioSession {
             ..Default::default()
         }));
         let (tx, rx) = mpsc::sync_channel(4); // At most 20 ms of pending audio per peer.
-        self.hub
-            .subscribers
-            .lock()
-            .map_err(|e| e.to_string())?
-            .insert(device.device_id.clone(), tx);
         let id = device.device_id.clone();
         let worker_id = id.clone();
         let hub = self.hub.clone();
@@ -323,7 +392,7 @@ impl AudioSession {
         let worker = match thread::Builder::new()
             .name(format!("roomwave-peer-{id}"))
             .spawn(move || {
-                let result = stream_peer(&device, &worker_stop, &hub, &peer_state, rx);
+                let result = stream_peer(&device, &worker_stop, &hub, &peer_state, tx, rx);
                 if let Ok(mut subscribers) = hub.subscribers.lock() {
                     subscribers.remove(&worker_id);
                 }
@@ -395,9 +464,11 @@ impl Drop for AudioSession {
 }
 
 struct AudioBlock {
+    mode: u64,
     frame: u64,
     capture_ns: u64,
     read_ns: u64,
+    published_ns: u64,
     play_ns: u64,
     pcm: [u8; PCM_BYTES],
     source: [i16; FRAMES * 8],
@@ -406,11 +477,7 @@ struct AudioBlock {
     test_channel: Option<u32>,
 }
 fn assignments_path() -> std::path::PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("RoomWave")
-        .join("channels.json")
+    crate::platform::settings_dir().join("channels.json")
 }
 #[cfg(test)]
 fn packet(session: u64, block: &AudioBlock) -> Vec<u8> {
@@ -478,288 +545,6 @@ fn routed_packet(
         len,
     }
 }
-fn capture_audio(stop: &AtomicBool, hub: &Hub) -> Res<()> {
-    thread::scope(|scope| {
-        scope.spawn(|| local_output::worker(stop, hub));
-        // Query device metadata on its own worker; COM/driver queries never delay UDP PCM production.
-        scope.spawn(|| {
-            if wasapi::initialize_mta().is_err() {
-                return;
-            }
-            while !stop.load(Ordering::Relaxed) {
-                let signature = endpoint_signature(hub).ok();
-                let output_id = hub.local_config.lock().unwrap().output_id.clone();
-                let output_signature = output_id.and_then(|id| {
-                    crate::layout::read_endpoint(&id)
-                        .ok()
-                        .map(|(layout, rate)| (id, layout, rate))
-                });
-                *hub.output_endpoint.lock().unwrap() = output_signature;
-                if let Ok(devices) = local_output::endpoints() {
-                    *hub.windows_outputs.lock().unwrap() = devices;
-                }
-                if let Ok(mut current) = hub.endpoint.lock() {
-                    *current = signature;
-                }
-                thread::sleep(Duration::from_millis(500));
-            }
-            wasapi::deinitialize();
-        });
-        let mut timeline = (0u64, 0i64);
-        while !stop.load(Ordering::Relaxed) {
-            if let Err(e) = capture_endpoint(stop, hub, &mut timeline) {
-                if let Ok(mut s) = hub.state.lock() {
-                    s.error = Some(e.to_string());
-                    s.layout = Layout::default();
-                }
-                thread::sleep(Duration::from_millis(500));
-            }
-        }
-    });
-    Ok(())
-}
-fn capture_device(hub: &Hub) -> Res<wasapi::Device> {
-    let source = hub
-        .local_config
-        .lock()
-        .map_err(|e| e.to_string())?
-        .source_id
-        .clone();
-    let enumerator = DeviceEnumerator::new()?;
-    Ok(if let Some(id) = source {
-        enumerator.get_device(&id)?
-    } else {
-        enumerator.get_default_device(&Direction::Render)?
-    })
-}
-fn endpoint_signature(hub: &Hub) -> Res<(String, Layout, u32)> {
-    let device = capture_device(hub)?;
-    let id = device.get_id()?;
-    let (layout, rate) = crate::layout::read_endpoint(&id)?;
-    Ok((id, layout, rate))
-}
-fn capture_endpoint(stop: &AtomicBool, hub: &Hub, timeline: &mut (u64, i64)) -> Res<()> {
-    wasapi::initialize_mta().ok()?;
-    struct Com;
-    impl Drop for Com {
-        fn drop(&mut self) {
-            wasapi::deinitialize();
-        }
-    }
-    let _com = Com;
-    let output = capture_device(hub)?;
-    let mut audio = output.get_iaudioclient()?;
-    let id = output.get_id()?;
-    let (layout, rate) = crate::layout::read_endpoint(&id)?;
-    let signature = (id, layout.clone(), rate);
-    {
-        let mut s = hub.state.lock().map_err(|e| e.to_string())?;
-        s.layout = layout.clone();
-        s.error = layout.error.clone();
-        s.output_name = Some(output.get_friendlyname()?);
-    }
-    if let Some(e) = &layout.error {
-        return Err(e.clone().into());
-    }
-    let channels = layout.channel_count;
-    let align = channels * 2;
-    let block_bytes = FRAMES * align;
-    audio.initialize_client(
-        &WaveFormat::new(
-            16,
-            16,
-            &SampleType::Int,
-            48000,
-            channels,
-            Some(layout.channel_mask),
-        ),
-        &Direction::Capture,
-        &StreamMode::EventsShared {
-            autoconvert: true,
-            buffer_duration_hns: 200_000,
-        },
-    )?;
-    let event = audio.set_get_eventhandle()?;
-    let capture = audio.get_audiocaptureclient()?;
-    hub.state.lock().map_err(|e| e.to_string())?.output_name = Some(output.get_friendlyname()?);
-    let clock = Clock::new();
-    let mut frame = timeline.0;
-    let mut next_send = timeline.1;
-    let mut started = false;
-    let result = (|| -> Res<()> {
-        let mut pcm = VecDeque::with_capacity(4800 * align);
-        let mut times = VecDeque::with_capacity(4800);
-        let mut reads = VecDeque::with_capacity(4800);
-        let mut endpoint_checked = Instant::now();
-        let mut peak = 0f32;
-        let mut reported = Instant::now();
-        let mut budget_at = Instant::now();
-        while !stop.load(Ordering::Relaxed) {
-            if endpoint_checked.elapsed() >= Duration::from_millis(500) {
-                if hub.endpoint.lock().map_err(|e| e.to_string())?.as_ref() != Some(&signature) {
-                    break;
-                }
-                endpoint_checked = Instant::now();
-            }
-            if hub
-                .subscribers
-                .lock()
-                .map_err(|e| e.to_string())?
-                .is_empty()
-            {
-                if started {
-                    audio.stop_stream()?;
-                    started = false;
-                    pcm.clear();
-                    times.clear();
-                    reads.clear();
-                    hub.state.lock().map_err(|e| e.to_string())?.peak = 0.0;
-                }
-                thread::sleep(Duration::from_millis(10));
-                continue;
-            }
-            if !started {
-                audio.start_stream()?;
-                started = true;
-                if next_send == 0 {
-                    next_send = clock.now();
-                }
-            }
-            while capture.get_next_packet_size()?.unwrap_or(0) > 0 {
-                let previous = pcm.len();
-                let info = capture.read_from_device_to_deque(&mut pcm)?;
-                let read_ns = clock.now() as u64;
-                for n in 0..(pcm.len() - previous) / align {
-                    reads.push_back(read_ns);
-                    times.push_back(if info.flags.timestamp_error || info.timestamp == 0 {
-                        0
-                    } else {
-                        info.timestamp * 100 + n as u64 * 1_000_000_000 / 48000
-                    });
-                }
-            }
-            if pcm.len() > 4800 * align {
-                let n = pcm.len() - 2400 * align;
-                pcm.drain(..n);
-                times.drain(..n / align);
-                reads.drain(..n / align);
-            }
-            let now = clock.now();
-            if now > next_send + 100_000_000 {
-                let skipped = (now - next_send) / PERIOD_NS;
-                frame += skipped as u64 * FRAMES as u64;
-                next_send += skipped * PERIOD_NS;
-                pcm.clear();
-                times.clear();
-                reads.clear();
-            }
-            while pcm.len() >= block_bytes || clock.now() >= next_send + 20_000_000 {
-                // Never move the timeline without advancing its frame index. In
-                // particular, an idle endpoint must catch up with silence; resetting
-                // next_send alone strands receivers ahead of every future packet.
-                let mut block = AudioBlock {
-                    frame,
-                    capture_ns: 0,
-                    read_ns: clock.now() as u64,
-                    play_ns: (next_send + hub.delay()) as u64,
-                    pcm: [0; PCM_BYTES],
-                    source: [0; FRAMES * 8],
-                    mask: layout.channel_mask,
-                    channels,
-                    test_channel: None,
-                };
-                if pcm.len() >= block_bytes {
-                    block.capture_ns = times.front().copied().unwrap_or(0);
-                    block.read_ns = reads.front().copied().unwrap_or(block.read_ns);
-                    times.drain(..FRAMES);
-                    reads.drain(..FRAMES);
-                    for sample in &mut block.source[..FRAMES * channels] {
-                        *sample = i16::from_le_bytes([
-                            pcm.pop_front().unwrap(),
-                            pcm.pop_front().unwrap(),
-                        ]);
-                    }
-                }
-                {
-                    let mut state = hub.state.lock().map_err(|e| e.to_string())?;
-                    if hub.local_test.load(Ordering::Acquire) {
-                        block.source.fill(0);
-                    }
-                    if let Some((speaker, start)) = state.test {
-                        let start = if start == 0 { frame } else { start };
-                        if frame - start >= 28800 || channel_index(block.mask, speaker).is_none() {
-                            state.test = None;
-                        } else {
-                            block.source.fill(0);
-                            block.test_channel = Some(speaker);
-                            let index = channel_index(block.mask, speaker).unwrap();
-                            for n in 0..FRAMES {
-                                block.source[n * channels + index] =
-                                    test_sample(frame - start + n as u64, 48000, speaker);
-                            }
-                            state.test = Some((speaker, start));
-                        }
-                    }
-                }
-                // Compatibility mode: front stereo (mono duplicated), unchanged for a stereo endpoint.
-                for n in 0..FRAMES {
-                    for (side, speaker) in [1, 2].into_iter().enumerate() {
-                        let index = channel_index(block.mask, speaker).or({
-                            if channels == 1 {
-                                Some(0)
-                            } else {
-                                None
-                            }
-                        });
-                        let value = index.map(|i| block.source[n * channels + i]).unwrap_or(0);
-                        block.pcm[n * 4 + side * 2..n * 4 + side * 2 + 2]
-                            .copy_from_slice(&value.to_le_bytes());
-                    }
-                }
-                for value in block.pcm.chunks_exact(2) {
-                    peak =
-                        peak.max((i16::from_le_bytes([value[0], value[1]]) as f32 / 32768.0).abs());
-                }
-                hub.publish(Arc::new(block));
-                frame += FRAMES as u64;
-                next_send += PERIOD_NS;
-            }
-            if reported.elapsed() >= Duration::from_millis(500) {
-                hub.state.lock().map_err(|e| e.to_string())?.peak = peak;
-                peak = 0.0;
-                reported = Instant::now();
-            }
-            if budget_at.elapsed() >= Duration::from_millis(100) {
-                let requested = hub
-                    .state
-                    .lock()
-                    .map_err(|e| e.to_string())?
-                    .budgets
-                    .values()
-                    .copied()
-                    .max()
-                    .unwrap_or(PLAYOUT_NS);
-                let current = hub.delay();
-                // A single host budget keeps all receivers on one timeline. Limit rate
-                // changes to 0.1%, within the receivers' continuous drift correction.
-                hub.delay_ns.store(
-                    current + (requested - current).clamp(-100_000, 100_000),
-                    Ordering::Relaxed,
-                );
-                budget_at = Instant::now();
-            }
-            // Capture wakes on the engine event and publishes complete 5 ms packets immediately.
-            // The timeout only maintains silence/stop responsiveness when the endpoint is idle.
-            let _ = event.wait_for_event(10);
-        }
-        Ok(())
-    })();
-    *timeline = (frame, next_send);
-    if started {
-        audio.stop_stream()?;
-    }
-    result
-}
 pub struct LocalTestGuard(Arc<Hub>);
 impl Drop for LocalTestGuard {
     fn drop(&mut self) {
@@ -772,11 +557,19 @@ impl Drop for LocalTestGuard {
     }
 }
 
+fn routing_metadata(hub: &Hub, device_id: &str) -> Value {
+    let speaker = hub.assignments.lock().unwrap().get(device_id).copied();
+    let state = hub.state.lock().unwrap();
+    let available = speaker.is_none_or(|s| state.layout.channels.iter().any(|c| c.mask == s));
+    json!({"speaker": speaker, "available": available})
+}
+
 fn stream_peer(
     device: &Device,
     stop: &AtomicBool,
     hub: &Hub,
     shared: &Mutex<ReceiverState>,
+    tx: SyncSender<Arc<AudioBlock>>,
     rx: Receiver<Arc<AudioBlock>>,
 ) -> Res<()> {
     let address: SocketAddr = if device.ip_address.contains(':') {
@@ -790,7 +583,7 @@ fn stream_peer(
     control.set_read_timeout(Some(Duration::from_secs(3)))?;
     control.set_write_timeout(Some(Duration::from_secs(2)))?;
     let session = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64 & i64::MAX as u64;
-    let start = json!({"type":"start", "protocolVersion":4, "deviceId":device.device_id, "sessionId":session.to_string(), "sampleRate":48000, "channels":2, "framesPerPacket":FRAMES, "format":"s16le", "targetDelayMs":PLAYOUT_NS / 1_000_000});
+    let start = json!({"type":"start", "protocolVersion":4, "deviceId":device.device_id, "sessionId":session.to_string(), "sampleRate":48000, "channels":2, "framesPerPacket":FRAMES, "format":"s16le", "targetDelayMs":PLAYOUT_NS / 1_000_000, "routing":routing_metadata(hub, &device.device_id)});
     writeln!(control, "{start}")?;
     let mut response = String::new();
     BufReader::new(control.try_clone()?)
@@ -806,6 +599,12 @@ fn stream_peer(
         return Err(format!("Receiver rejected connection: {response}").into());
     }
     let extended = response["extendedTiming"].as_bool() == Some(true);
+    let low_rate_supported = response["pcm16k"].as_bool() == Some(true);
+    shared.lock().map_err(|e| e.to_string())?.low_rate_supported = low_rate_supported;
+    if hub.mode.load(Ordering::Acquire) & 1 != 0 && !low_rate_supported {
+        return Err("Update Android to use the 16 kHz profile".into());
+    }
+    let fec_supported = response["xorFec"].as_bool() == Some(true);
     let mono_supported = response["monoPcm"].as_bool() == Some(true);
     if !extended {
         return Err("Update this phone to the AAudio RoomWave receiver before connecting".into());
@@ -825,7 +624,15 @@ fn stream_peer(
     udp.connect(destination)?;
     udp.set_nonblocking(true)?;
     control.set_nonblocking(true)?;
-    shared.lock().map_err(|e| e.to_string())?.status = "streaming".into();
+    // Reserve a safe initial budget before subscribing to PCM. Existing outputs
+    // follow the normal smooth ramp; an idle capture can initialize immediately.
+    hub.state
+        .lock()
+        .map_err(|e| e.to_string())?
+        .budgets
+        .insert(device.device_id.clone(), PLAYOUT_NS);
+    let mut admitted = false;
+    let mut clock_samples = 0u32;
     log::info!("receiver connected {} at {address}", device.device_name);
     let clock = Clock::new();
     let mut sync = ClockSync::default();
@@ -833,20 +640,50 @@ fn stream_peer(
     let mut last_pong = Instant::now();
     let mut last_ping = Instant::now() - Duration::from_secs(1);
     let connected = Instant::now();
+    let mut preparation_ms = 0u64;
     let mut incoming = Vec::new();
     let mut outgoing: VecDeque<u8> = VecDeque::new();
     let mut sent = 0u64;
+    let mut last_mode = 0u64;
+    let (mut quality_packets, mut latency_packets, mut original_bytes, mut fec_wire_bytes) =
+        (0u64, 0u64, 0u64, 0u64);
+    let mut fec_encoder = crate::fec::Encoder::default();
+    let mut fec_bytes = [0u8; crate::fec::MAX];
+    let (
+        mut expired,
+        mut would_block,
+        mut fec_sent,
+        mut fec_failed,
+        mut nack_received,
+        mut repairs_sent,
+        mut repairs_expired,
+        mut repair_failed,
+    ) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    let mut read_to_publish = crate::transport_stats::Histogram::default();
+    let mut publish_to_send = crate::transport_stats::Histogram::default();
+    let mut send_intervals = crate::transport_stats::Histogram::default();
+    let mut raw_rtt = crate::transport_stats::Histogram::default();
+    let mut last_send = 0u64;
+    let mut packet_processing = crate::transport_stats::Histogram::default();
+    let mut sender_iterations = crate::transport_stats::Histogram::default();
+    let mut pending_block = None;
     let mut recent: VecDeque<RoutedPacket> = VecDeque::with_capacity(64);
     let result = (|| -> Res<()> {
         while !stop.load(Ordering::Relaxed) {
+            let iteration_started = Instant::now();
             // Endpoint changes may briefly pause capture; keep peer clocks/connections alive.
             // Drain stale backlog after handshake; deadlines are shared, never shifted per receiver.
             for _ in 0..40 {
-                let block = match rx.try_recv() {
+                let block = match pending_block
+                    .take()
+                    .map(Ok)
+                    .unwrap_or_else(|| rx.try_recv())
+                {
                     Ok(block) => block,
                     Err(_) => break,
                 };
                 if block.play_ns as i64 <= clock.now() {
+                    expired += 1;
                     continue;
                 }
                 let speaker = hub
@@ -858,17 +695,53 @@ fn stream_peer(
                 if speaker.is_some() && !mono_supported {
                     return Err("Update Android RoomWave to receive assigned mono channels".into());
                 }
-                let routed = routed_packet(session, &block, clock.now() as u64, speaker);
+                let send_at = clock.now() as u64;
+                read_to_publish.add_ns(block.published_ns.saturating_sub(block.read_ns));
+                publish_to_send.add_ns(send_at.saturating_sub(block.published_ns));
+                if last_send > 0 {
+                    send_intervals.add_ns(send_at.saturating_sub(last_send));
+                }
+                last_send = send_at;
+                let processing_started = Instant::now();
+                let routed = routed_packet(session, &block, send_at, speaker);
+                last_mode = block.mode;
                 let sent_result = udp.send(&routed.bytes[..routed.len]);
                 match sent_result {
-                    Ok(_) => sent += 1,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Ok(_) => {
+                        sent += 1;
+                        original_bytes += routed.len as u64;
+                        if block.mode & 1 == 0 {
+                            quality_packets += 1;
+                        } else {
+                            latency_packets += 1;
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        would_block += 1;
+                    }
                     Err(e) => return Err(e.into()),
+                }
+                if fec_supported {
+                    if let Some(len) = fec_encoder.push(
+                        session,
+                        routed.frame,
+                        &routed.bytes[..routed.len],
+                        &mut fec_bytes,
+                    ) {
+                        match udp.send(&fec_bytes[..len]) {
+                            Ok(_) => {
+                                fec_sent += 1;
+                                fec_wire_bytes += len as u64;
+                            }
+                            Err(_) => fec_failed += 1,
+                        }
+                    }
                 }
                 if recent.len() == 64 {
                     recent.pop_front();
                 }
                 recent.push_back(routed);
+                packet_processing.add_ns(processing_started.elapsed().as_nanos() as u64);
             }
             // Feedback arrives on the same connected UDP socket, so the peer address
             // and session are authenticated to this local stream. Bound amplification.
@@ -879,6 +752,7 @@ fn stream_peer(
                         if &nack[..8] == b"RWNA\0\0\0\x04"
                             && nack[8..16] == session.to_be_bytes() =>
                     {
+                        nack_received += 1;
                         let frame = u64::from_be_bytes(nack[16..24].try_into().unwrap());
                         let now = clock.now();
                         let guard =
@@ -888,8 +762,17 @@ fn stream_peer(
                             .find(|b| b.frame == frame && b.play_ns as i64 > now + guard)
                         {
                             let mut bytes = block.bytes;
-                            bytes[48..56].copy_from_slice(&(now as u64).to_be_bytes());
-                            let _ = udp.send(&bytes[..block.len]);
+                            if fec_supported {
+                                bytes[7] |= 2;
+                            } else {
+                                bytes[48..56].copy_from_slice(&(now as u64).to_be_bytes());
+                            }
+                            match udp.send(&bytes[..block.len]) {
+                                Ok(_) => repairs_sent += 1,
+                                Err(_) => repair_failed += 1,
+                            }
+                        } else {
+                            repairs_expired += 1;
                         }
                     }
                     Ok(_) => {}
@@ -906,7 +789,7 @@ fn stream_peer(
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(e) => return Err(e.into()),
                 }
-                if incoming.len() > 4096 {
+                if incoming.len() > 16 * 1024 {
                     return Err("Control response too large".into());
                 }
             }
@@ -927,12 +810,18 @@ fn stream_peer(
                             .and_then(|v| v.parse().ok()),
                         message["phoneSendNs"].as_str().and_then(|v| v.parse().ok()),
                     ) {
+                        let rtt_ns =
+                            (i128::from(t4) - i128::from(t1)) - (i128::from(t3) - i128::from(t2));
+                        if t3 >= t2 && (0..=1_000_000_000).contains(&rtt_ns) {
+                            raw_rtt.add_ns(rtt_ns as u64);
+                        }
                         sync.observe(t1, t2, t3, t4);
+                        clock_samples = clock_samples.saturating_add(1);
                     }
                     pending_ping = None;
                     last_pong = Instant::now();
                 }
-                if message["stages"]["outputBackend"] == "AAudio" {
+                if admitted && message["stages"]["outputBackend"] == "AAudio" {
                     let stages = &message["stages"];
                     let jitter =
                         finite_metric(stages, "recommendedJitterMs", 20.0, 50.0).unwrap_or(30.0);
@@ -947,9 +836,20 @@ fn stream_peer(
                         .insert(device.device_id.clone(), requested);
                 }
                 let mut s = shared.lock().map_err(|e| e.to_string())?;
+                s.transport = json!({"streamMode":if last_mode&1==0 {"quality"} else {"latency"},"modeRevision":last_mode>>1,"qualityPacketsSent":quality_packets,"latencyPacketsSent":latency_packets,"originalBytesSent":original_bytes,"fecBytesSent":fec_wire_bytes,"pipelinePolicy":"pcm48-prepared-join-v2","admitted":admitted,"preparationMs":if admitted {preparation_ms} else {connected.elapsed().as_millis() as u64},"packetProcessing":packet_processing.snapshot(),"senderIteration":sender_iterations.snapshot(),"fecEnabled":fec_supported,"expiredBeforeSend":expired,"udpWouldBlock":would_block,
+                    "fecSent":fec_sent,"fecSendFailed":fec_failed,"nackReceived":nack_received,"repairsSent":repairs_sent,
+                    "repairUnavailableOrExpired":repairs_expired,"repairSendFailed":repair_failed,
+                    "readToPublish":read_to_publish.snapshot(),"publishToSend":publish_to_send.snapshot(),
+                    "sendIntervals":send_intervals.snapshot(),"rawControlRtt":raw_rtt.snapshot()});
                 s.packets_sent = sent;
                 s.receiver_packets = message["packets"].as_u64().unwrap_or(0);
                 s.receiver_lost = message["lost"].as_u64().unwrap_or(0);
+                s.last_report_unix_ms = Some(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                );
                 s.stages = message["stages"].clone();
                 s.latency_ms = finite_metric(&message, "latencyMs", 0.0, 5000.0);
                 s.rtt_ms = finite_metric(&message, "rttMs", 0.0, 1000.0);
@@ -962,8 +862,8 @@ fn stream_peer(
             if last_pong.elapsed() > Duration::from_secs(5) {
                 return Err("Receiver heartbeat timed out".into());
             }
-            let interval = if connected.elapsed() < Duration::from_secs(3) {
-                100
+            let interval = if !admitted || connected.elapsed() < Duration::from_secs(3) {
+                50
             } else {
                 500
             };
@@ -973,7 +873,7 @@ fn stream_peer(
             {
                 let now = clock.now();
                 let sample = sync.best(now);
-                let ping = json!({"type":"ping", "hostSendNs":now.to_string(), "clockOffsetNs":sample.map(|s| s.offset_ns.to_string()), "rttMs":sample.map(|s| s.rtt_ns as f64 / 1_000_000.0)});
+                let ping = json!({"type":"ping", "hostSendNs":now.to_string(), "clockOffsetNs":sample.map(|s| s.offset_ns.to_string()), "rttMs":sample.map(|s| s.rtt_ns as f64 / 1_000_000.0), "routing":routing_metadata(hub, &device.device_id)});
                 outgoing.extend(format!("{ping}\n").bytes());
                 pending_ping = Some(now);
                 last_ping = Instant::now();
@@ -988,7 +888,27 @@ fn stream_peer(
                     Err(e) => return Err(e.into()),
                 }
             }
-            thread::sleep(Duration::from_millis(2));
+            if !admitted
+                && hub.admit_peer(
+                    &device.device_id,
+                    &tx,
+                    clock_samples >= 3 && sync.best(clock.now()).is_some(),
+                )?
+            {
+                admitted = true;
+                preparation_ms = connected.elapsed().as_millis() as u64;
+                shared.lock().map_err(|e| e.to_string())?.status = "streaming".into();
+            }
+            sender_iterations.add_ns(iteration_started.elapsed().as_nanos() as u64);
+            // Wake immediately on PCM; retain a bounded timeout for control/NACK work.
+            // This is a capacity limit, not a playback prebuffer.
+            pending_block = match rx.recv_timeout(Duration::from_millis(2)) {
+                Ok(block) => Some(block),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("Capture queue disconnected".into())
+                }
+            };
         }
         Ok(())
     })();
@@ -998,6 +918,15 @@ fn stream_peer(
     }
     result
 }
+// Called at most once per 100 ms. Keep headroom below the 0.5% playback servo limit.
+fn next_playout_budget(current: i64, requested: i64) -> i64 {
+    current + (requested - current).clamp(-100_000, 300_000)
+}
+
+fn startup_budget_ready(delay_ns: i64) -> bool {
+    delay_ns >= PLAYOUT_NS
+}
+
 fn finite_metric(message: &Value, key: &str, min: f64, max: f64) -> Option<f64> {
     message[key]
         .as_f64()
@@ -1008,15 +937,96 @@ fn finite_metric(message: &Value, key: &str, min: f64, max: f64) -> Option<f64> 
 mod tests {
     use super::*;
     #[test]
+    fn startup_ramp_stays_within_playback_correction_and_reaches_target() {
+        let mut budget = 40_000_000;
+        let mut followed = budget as f64;
+        let mut max_error = 0f64;
+        for _ in 0..140 {
+            let next = next_playout_budget(budget, 80_000_000);
+            assert!((0..=300_000).contains(&(next-budget)));
+            budget = next;
+            // Same proportional +/-0.5% servo as PC and native Android, 5 ms blocks.
+            for _ in 0..20 {
+                let error = budget as f64 - followed;
+                max_error = max_error.max(error.abs());
+                followed += (error/1e9).clamp(-0.005,0.005)*5_000_000.;
+            }
+        }
+        assert_eq!(budget,80_000_000);
+        assert!(max_error < 4_000_000.);
+        assert_eq!(next_playout_budget(80_000_000,40_000_000),79_900_000);
+        assert_eq!(next_playout_budget(79_950_000,80_000_000),80_000_000);
+    }
+    #[test]
+    fn new_peer_waits_for_clocks_and_budget_without_shifting_existing_outputs() {
+        let hub = Hub::default();
+        hub.delay_ns.store(42_000_000, Ordering::Relaxed);
+        let (existing, _existing_rx) = mpsc::sync_channel(4);
+        hub.subscribers
+            .lock()
+            .unwrap()
+            .insert("existing".into(), existing);
+        let (new, new_rx) = mpsc::sync_channel(4);
+        assert!(!hub.admit_peer("new", &new, false).unwrap());
+        assert!(!hub.admit_peer("new", &new, true).unwrap());
+        assert_eq!(hub.delay(), 42_000_000);
+        assert_eq!(hub.subscribers.lock().unwrap().len(), 1);
+        assert!(new_rx.try_recv().is_err());
+        hub.delay_ns.store(PLAYOUT_NS, Ordering::Relaxed);
+        assert!(hub.admit_peer("new", &new, true).unwrap());
+        assert_eq!(hub.delay(), PLAYOUT_NS);
+        assert_eq!(hub.subscribers.lock().unwrap().len(), 2);
+    }
+    #[test]
+    fn idle_session_can_prepare_budget_immediately_but_still_requires_clocks() {
+        let hub = Hub::default();
+        let (tx, _rx) = mpsc::sync_channel(4);
+        assert!(!hub.admit_peer("new", &tx, false).unwrap());
+        assert!(hub.subscribers.lock().unwrap().is_empty());
+        assert!(hub.admit_peer("new", &tx, true).unwrap());
+        assert_eq!(hub.delay(), PLAYOUT_NS);
+    }
+    #[test]
+    fn routing_metadata_tracks_assignment_and_layout_changes() {
+        let hub = Hub::default();
+        hub.state.lock().unwrap().layout = Layout::new(6, 0x3f);
+        assert_eq!(
+            routing_metadata(&hub, "phone"),
+            json!({"speaker":null,"available":true})
+        );
+        hub.assignments.lock().unwrap().insert("phone".into(), 16);
+        assert_eq!(
+            routing_metadata(&hub, "phone"),
+            json!({"speaker":16,"available":true})
+        );
+        hub.state.lock().unwrap().layout = Layout::new(6, 0x60f);
+        assert_eq!(
+            routing_metadata(&hub, "phone"),
+            json!({"speaker":16,"available":false})
+        );
+        hub.assignments.lock().unwrap().insert("phone".into(), 512);
+        assert_eq!(
+            routing_metadata(&hub, "phone"),
+            json!({"speaker":512,"available":true})
+        );
+        hub.assignments.lock().unwrap().remove("phone");
+        assert_eq!(
+            routing_metadata(&hub, "phone"),
+            json!({"speaker":null,"available":true})
+        );
+    }
+    #[test]
     fn mono_routing_preserves_samples_deadlines_and_isolates_test() {
         for (channels, mask) in [(2, 3), (6, 0x3f), (6, 0x60f), (8, 0x63f)] {
             let mut block = AudioBlock {
                 frame: 240,
                 capture_ns: 10,
                 read_ns: 20,
+                published_ns: 0,
                 play_ns: 100,
                 pcm: [9; PCM_BYTES],
                 source: [0; FRAMES * 8],
+                mode: 0,
                 mask,
                 channels,
                 test_channel: None,
@@ -1061,50 +1071,16 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires a Windows audio endpoint playing system sound"]
-    fn capture_timestamp_probe() -> Res<()> {
-        wasapi::initialize_mta().ok()?;
-        let device = DeviceEnumerator::new()?.get_default_device(&Direction::Render)?;
-        let mut audio = device.get_iaudioclient()?;
-        audio.initialize_client(
-            &WaveFormat::new(16, 16, &SampleType::Int, 48000, 2, None),
-            &Direction::Capture,
-            &StreamMode::EventsShared {
-                autoconvert: true,
-                buffer_duration_hns: 200_000,
-            },
-        )?;
-        let event = audio.set_get_eventhandle()?;
-        let capture = audio.get_audiocaptureclient()?;
-        let clock = Clock::new();
-        let mut bytes = vec![0; audio.get_buffer_size()? as usize * 4];
-        audio.start_stream()?;
-        let started = Instant::now();
-        while started.elapsed() < Duration::from_secs(2) {
-            let _ = event.wait_for_event(50);
-            while capture.get_next_packet_size()?.unwrap_or(0) > 0 {
-                let (frames, info) = capture.read_from_device(&mut bytes)?;
-                let now = clock.now();
-                println!(
-                    "capture_probe frames={frames} index={} qpc_age_ms={:.3} timestamp_error={}",
-                    info.index,
-                    (now as i128 - info.timestamp as i128 * 100) as f64 / 1e6,
-                    info.flags.timestamp_error
-                );
-            }
-        }
-        audio.stop_stream()?;
-        Ok(())
-    }
-    #[test]
     fn wire_packet_preserves_common_timeline_after_sequence_wrap() {
         let block = AudioBlock {
             frame: (u32::MAX as u64 + 6) * 240,
             capture_ns: 1234567890123,
             read_ns: 1234567890123,
+            published_ns: 0,
             play_ns: 1235067890123,
             pcm: [7; PCM_BYTES],
             source: [0; FRAMES * 8],
+            mode: 0,
             mask: 3,
             channels: 2,
             test_channel: None,
@@ -1137,9 +1113,11 @@ mod tests {
                 frame: n * 240,
                 capture_ns: 1,
                 read_ns: 1,
+                published_ns: 0,
                 play_ns: n * 5_000_000 + 500_000_000,
                 pcm: [0; PCM_BYTES],
                 source: [0; FRAMES * 8],
+                mode: 0,
                 mask: 3,
                 channels: 2,
                 test_channel: None,
@@ -1153,9 +1131,11 @@ mod tests {
             frame: 24000,
             capture_ns: 1,
             read_ns: 1,
+            published_ns: 0,
             play_ns: 1_000_000_000,
             pcm: [0; PCM_BYTES],
             source: [0; FRAMES * 8],
+            mode: 0,
             mask: 3,
             channels: 2,
             test_channel: None,
@@ -1165,6 +1145,15 @@ mod tests {
             &late_rx.recv().unwrap(),
             &fast_rx.recv().unwrap()
         ));
+        assert_eq!(hub.subscriber_drops.load(Ordering::Relaxed), 100);
+        assert_eq!(
+            hub.subscriber_drops_by_device.lock().unwrap().get("slow"),
+            Some(&100)
+        );
+        assert_eq!(
+            hub.subscriber_drops_by_device.lock().unwrap().get("fast"),
+            None
+        );
         hub.subscribers.lock().unwrap().remove("slow");
         hub.publish(block);
         assert!(fast_rx.try_recv().is_ok());

@@ -1,11 +1,37 @@
+// Release builds are desktop applications; diagnostic modes still support redirected stdout.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
+mod platform;
+mod audio_types;
+use platform::{default_output, local_test, windows_audio, virtual_probe};
 mod audio;
+
+mod diagnostics;
 mod discovery;
+mod fec;
 mod layout;
-mod local_test;
+
 mod timing;
+mod transport_stats;
+
 
 use audio::{AudioSession, AudioState};
 use discovery::{Discovery, DiscoverySnapshot};
+use tauri::Manager;
+
+#[tauri::command]
+fn get_virtual_audio_state(
+    output: tauri::State<'_, default_output::DefaultOutput>,
+) -> default_output::Status {
+    output.snapshot()
+}
+
+#[tauri::command]
+fn get_diagnostic_log_state(
+    log: tauri::State<'_, diagnostics::DiagnosticLog>,
+) -> diagnostics::LogState {
+    log.snapshot()
+}
 
 #[tauri::command]
 fn get_audio_state(audio: tauri::State<'_, AudioSession>) -> Result<AudioState, String> {
@@ -79,13 +105,34 @@ fn refresh_discovery(discovery: tauri::State<'_, Discovery>) -> Result<(), Strin
 }
 
 fn main() {
-    // Keep the console in Phase 1, including release builds, for useful LAN diagnostics.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    if default_output::guardian_entry() {
+        return;
+    }
+    let default_output = default_output::DefaultOutput::prepare();
+    let audio = AudioSession::new(&default_output.snapshot());
+    if default_output.snapshot().endpoint_id.is_some() {
+        if audio.wait_for_capture() {
+            if let Err(error) = default_output.activate() {
+                log::error!("Default output: {error}");
+            }
+        } else {
+            log::error!("Virtual audio capture is not ready; keeping the Windows default output");
+            default_output.cancel("Не удалось подготовить захват RoomWave Virtual Speakers. Устройство Windows не переключено.");
+        }
+    }
     let discovery = Discovery::start().expect("Could not start discovery worker");
     tauri::Builder::default()
         .manage(discovery)
-        .manage(AudioSession::new())
+        .manage(audio)
+        .manage(default_output)
+        .setup(|app| {
+            app.manage(diagnostics::DiagnosticLog::start(app.handle().clone()));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            get_virtual_audio_state,
+            get_diagnostic_log_state,
             get_discovery_state,
             refresh_discovery,
             get_audio_state,
@@ -95,6 +142,12 @@ fn main() {
             test_speaker,
             set_local_output
         ])
-        .run(tauri::generate_context!())
-        .expect("Could not run RoomWave Host");
+        .build(tauri::generate_context!())
+        .expect("Could not run RoomWave Host")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                app.state::<default_output::DefaultOutput>().stop();
+                app.state::<diagnostics::DiagnosticLog>().stop();
+            }
+        });
 }

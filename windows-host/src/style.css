@@ -2,3 +2,7 @@
 @media(min-width:900px){main{padding-left:60px;padding-right:60px}.intro h1{font-size:40px}.channel-chips label{font-size:12px}}
 @media(max-width:520px){main{padding:20px 18px}.app-header{margin-bottom:30px}h1{font-size:29px}.source-strip{padding:12px}.source-strip small{display:block;margin:3px 0 0}.device-heading{padding:17px 14px;gap:10px}.device-heading button:not(.toggle){padding:8px;font-size:11px}.device-icon{width:35px;height:38px}.device-title h2{font-size:14px}.device-body{padding:16px 14px}.phone-routing{display:block}.phone-routing>small{display:block;max-width:none;padding-top:10px}.count{font-size:10px}.tabs button{font-size:11px;padding:9px}.test-card{padding:17px 12px}.speaker small{font-size:8px}.speaker{padding:8px 0}.panel-inner{padding:19px}.panel-heading h2{font-size:20px}.card-foot{align-items:start}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+
+.log-path{white-space:pre-wrap;overflow-wrap:anywhere;user-select:all;font-size:12px;line-height:1.6;background:#f5f6f3;padding:12px;border-radius:8px}
+
+.diagnostic-block dd{min-width:0}

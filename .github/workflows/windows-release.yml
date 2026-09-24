@@ -1,0 +1,102 @@
+name: Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['windows-v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate version
+        id: version
+        env:
+          BUILD_REF: ${{ github.ref }}
+          BUILD_TAG: ${{ github.ref_name }}
+        run: |
+          $version=(Get-Content windows-host/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid version' }
+          $npm=(Get-Content windows-host/package.json -Raw | ConvertFrom-Json).version
+          $lock=(Get-Content windows-host/package-lock.json -Raw | ConvertFrom-Json).version
+          $cargo=Get-Content windows-host/src-tauri/Cargo.toml -Raw
+          if ($npm -ne $version -or $lock -ne $version -or $cargo -notmatch ('(?m)^version = "'+[regex]::Escape($version)+'"$')) { throw 'Host versions disagree' }
+          if ($env:BUILD_REF.StartsWith('refs/tags/') -and $env:BUILD_TAG -ne "windows-v$version") { throw 'Tag must match host version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.12.0'
+          cache: npm
+          cache-dependency-path: windows-host/package-lock.json
+      - name: Set up Rust
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Rust install failed' }
+          rustup override set 1.94.0
+          if ($LASTEXITCODE -ne 0) { throw 'Rust override failed' }
+      - name: Install JavaScript dependencies
+        working-directory: windows-host
+        run: npm ci
+      - name: Test host (hardware tests remain opt-in)
+        working-directory: windows-host/src-tauri
+        run: cargo test --locked
+      - name: Download verified installer dependencies
+        run: ./windows-installer/Prepare-BuildTools.ps1
+      - name: Build installer
+        run: ./windows-installer/Build-Installer.ps1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-installer
+          path: |
+            dist/windows/RoomWave-Setup-*.exe
+            dist/windows/RoomWave-Setup-*.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/windows-v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-installer
+          path: release-assets
+      - name: Verify and publish Windows release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum --check "RoomWave-Setup-$RELEASE_VERSION-x64.exe.sha256"
+          gh release create "$RELEASE_TAG" \
+            "RoomWave-Setup-$RELEASE_VERSION-x64.exe" \
+            "RoomWave-Setup-$RELEASE_VERSION-x64.exe.sha256" \
+            --verify-tag --draft --title "RoomWave $RELEASE_VERSION — Windows" \
+            --notes-file ../windows-installer/ReleaseNotes.md
+          gh release edit "$RELEASE_TAG" --draft=false --latest
