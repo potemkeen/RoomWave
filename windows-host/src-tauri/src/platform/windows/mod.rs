@@ -7,4 +7,4 @@ pub mod local_test;
 pub mod windows_audio;
 pub mod virtual_probe;
 mod paths;
-pub use paths::{settings_dir, log_dir};
+pub use paths::{settings_dir, log_dir, reveal_file};

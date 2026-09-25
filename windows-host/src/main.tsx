@@ -51,7 +51,7 @@ function Panel({title:heading,onClose,children}:{title:string;onClose:()=>void;c
 interface VirtualAudio { endpointId: string|null; previousOutputId: string|null; active: boolean; error: string|null }
 function App() {
   const [virtualAudio,setVirtualAudio]=React.useState<VirtualAudio|null>(null);
-  const [logState,setLogState]=React.useState<{path:string|null;recording:boolean;samples:number;error:string|null}|null>(null);
+  const [logState,setLogState]=React.useState<{path:string|null;recording:boolean;samples:number;error:string|null;endsAtUnixMs:number|null}|null>(null);
   const [snapshot,setSnapshot]=React.useState<DiscoverySnapshot>({devices:[],discovering:false,error:null});
   const [audio,setAudio]=React.useState<AudioState>({outputName:null,peak:0,targetDelayMs:80,receivers:[],layout:{name:"…",channelCount:0,channelMask:0,channels:[],error:null},assignments:{},captureError:null,testing:null,localConfig:{enabled:false,sourceId:null,outputId:null,speakers:[]},windowsOutputs:[],localOutput:{status:"disabled",error:null,syncErrorMs:null,latencyMs:null,outputMs:null,unavailable:[]}});
   const [loaded,setLoaded]=React.useState(false);
@@ -65,7 +65,7 @@ function App() {
   const config=draft??audio.localConfig;
   React.useEffect(()=>{
     let disposed=false;let timer:ReturnType<typeof setTimeout>;
-    async function update(){try{const [devices,state,log,virtualState]=await Promise.all([invoke<DiscoverySnapshot>("get_discovery_state"),invoke<AudioState>("get_audio_state"),invoke<{path:string|null;recording:boolean;samples:number;error:string|null}>("get_diagnostic_log_state"),invoke<VirtualAudio>("get_virtual_audio_state")]);if(!disposed){setSnapshot(devices);setAudio(state);setLogState(log);setVirtualAudio(virtualState);setLoaded(true);}}
+    async function update(){try{const [devices,state,log,virtualState]=await Promise.all([invoke<DiscoverySnapshot>("get_discovery_state"),invoke<AudioState>("get_audio_state"),invoke<{path:string|null;recording:boolean;samples:number;error:string|null;endsAtUnixMs:number|null}>("get_diagnostic_log_state"),invoke<VirtualAudio>("get_virtual_audio_state")]);if(!disposed){setSnapshot(devices);setAudio(state);setLogState(log);setVirtualAudio(virtualState);setLoaded(true);}}
       catch(e){if(!disposed)setError(String(e));}finally{if(!disposed)timer=setTimeout(update,500);}}
     void update();return()=>{disposed=true;clearTimeout(timer);};
   },[]);
@@ -132,7 +132,7 @@ function App() {
       <div className="panel-actions"><button onClick={()=>{setPanel(null);setDraft(null);}}>Отмена</button><button className="primary-button" disabled={busy.has("local")||invalidConfig||!loaded} onClick={()=>void action("local",async()=>{await invoke("set_local_output",{config});setDraft(null);})}>{busy.has("local")?"Сохраняем…":"Сохранить настройки"}</button></div><small className="help">{draft===null?"Настройки сохранены. Можно закрыть это окно.":"Изменения применятся после сохранения."}</small>
     </>:<>
       <section className="diagnostic-block"><h3>Аудиодрайвер</h3><p className="help">VB-CABLE от VB-Audio — donationware. Если драйвер полезен, автор приветствует оплату лицензии или пожертвование. Сайт: https://vb-cable.com · Условия: https://vb-audio.com/Services/licensing.htm</p></section>
-      <section className="diagnostic-block"><h3>Запись сеанса</h3><p className="help">{logState?.recording ? `Записывается · ${logState.samples} замеров` : "Запись остановлена"}</p><p className="help">Подробные показатели сохраняются в файл каждые 0,5 секунды. Звук не записывается.</p>{logState?.path && <pre className="log-path">{logState.path}</pre>}{logState?.error && <pre className="error-detail">{logState.error}</pre>}</section>
+      <section className="diagnostic-block"><h3>Запись сеанса</h3><p className="help">{logState?.recording ? `Записывается · ${logState.samples} замеров · осталось ${Math.max(0,Math.ceil(((logState.endsAtUnixMs??Date.now())-Date.now())/60000))} мин` : "Подробная запись выключена"}</p><p className="help">Для поиска проблем можно записать показатели на 10 минут. Запись остановится автоматически. Звук не сохраняется.</p><button disabled={busy.has("logging")} onClick={()=>void action("logging",async()=>{await invoke(logState?.recording?"stop_diagnostic_log":"start_diagnostic_log");setLogState(await invoke("get_diagnostic_log_state"));})}>{logState?.recording?"Остановить запись":"Записать сеанс · 10 минут"}</button>{logState?.path&&<><button disabled={busy.has("logging")} onClick={()=>void action("logging",()=>invoke("reveal_diagnostic_log"))}>Показать файл</button><pre className="log-path">{logState.path}</pre></>}{logState?.error&&<pre className="error-detail">{logState.error}</pre>}{error&&<p className="error-detail">{error}</p>}<p className="help">Отдельно сохраняется небольшой журнал ошибок: errors.log в папке логов.</p></section>
       <p className="panel-description">Задержка измеряется от получения PCM хостом до расчётного воспроизведения. Буфер виртуального кабеля до захвата и акустическая задержка динамиков в неё не входят; полная задержка пока не измерена.</p>
       <section className="diagnostic-block"><h3>Источник</h3><MetricRows rows={[
         ["Устройство",audio.outputName??"—"],

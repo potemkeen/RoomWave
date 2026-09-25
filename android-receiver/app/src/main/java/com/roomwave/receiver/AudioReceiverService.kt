@@ -120,7 +120,6 @@ class AudioReceiverService : Service() {
         val output = socket.getOutputStream()
         val line = ByteArrayOutputStream()
         var lastMessage = System.nanoTime()
-        var lastStatsLog = 0L
         fun readMessage(): JSONObject? {
             while (running.get() && !socket.isClosed) {
                 check(System.nanoTime() - lastMessage < 5_000_000_000L) { "Host heartbeat timed out" }
@@ -201,10 +200,6 @@ class AudioReceiverService : Service() {
                                 .put("stages",stageReport)
                                 .put("phoneSendNs", System.nanoTime().toString())
                             reply(pong)
-                            if (receiveNs - lastStatsLog >= 5_000_000_000L) {
-                                Log.i(TAG, "stages=$stageReport sync=${synchronization.status} errorMs=${synchronization.errorMs} latencyMs=${report.latencyMs} rttMs=${report.rttMs} packets=$receivedPackets lost=$missingPackets")
-                                lastStatsLog = receiveNs
-                            }
                             main.post { if (updatedChannel != null) channelLabel = updatedChannel; packets = receivedPackets; lost = missingPackets; latencyReport = report; syncReport = synchronization; stageMetrics = stageReport }
                         }
                         else -> error("Unexpected control message")

@@ -7,6 +7,7 @@ use platform::{default_output, local_test, windows_audio, virtual_probe};
 mod audio;
 
 mod diagnostics;
+mod error_log;
 mod discovery;
 mod fec;
 mod layout;
@@ -31,6 +32,20 @@ fn get_diagnostic_log_state(
     log: tauri::State<'_, diagnostics::DiagnosticLog>,
 ) -> diagnostics::LogState {
     log.snapshot()
+}
+
+#[tauri::command]
+fn start_diagnostic_log(app: tauri::AppHandle, log: tauri::State<'_, diagnostics::DiagnosticLog>) -> Result<(), String> {
+    log.start(app)
+}
+#[tauri::command]
+fn stop_diagnostic_log(log: tauri::State<'_, diagnostics::DiagnosticLog>) {
+    log.stop();
+}
+#[tauri::command]
+fn reveal_diagnostic_log(log: tauri::State<'_, diagnostics::DiagnosticLog>) -> Result<(), String> {
+    let path = log.snapshot().path.ok_or("Сначала запишите диагностический сеанс")?;
+    platform::reveal_file(std::path::Path::new(&path)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -105,10 +120,10 @@ fn refresh_discovery(discovery: tauri::State<'_, Discovery>) -> Result<(), Strin
 }
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     if default_output::guardian_entry() {
         return;
     }
+    error_log::init();
     let default_output = default_output::DefaultOutput::prepare();
     let audio = AudioSession::new(&default_output.snapshot());
     if default_output.snapshot().endpoint_id.is_some() {
@@ -127,12 +142,15 @@ fn main() {
         .manage(audio)
         .manage(default_output)
         .setup(|app| {
-            app.manage(diagnostics::DiagnosticLog::start(app.handle().clone()));
+            app.manage(diagnostics::DiagnosticLog::new());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_virtual_audio_state,
             get_diagnostic_log_state,
+            start_diagnostic_log,
+            stop_diagnostic_log,
+            reveal_diagnostic_log,
             get_discovery_state,
             refresh_discovery,
             get_audio_state,

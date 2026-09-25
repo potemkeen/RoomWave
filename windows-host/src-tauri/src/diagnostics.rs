@@ -13,7 +13,11 @@ use std::{
 };
 use tauri::Manager;
 
+const SESSION_DURATION: Duration = Duration::from_secs(10 * 60);
 const LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+fn session_active(stopped: bool, elapsed: Duration) -> bool {
+    !stopped && elapsed < SESSION_DURATION
+}
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogState {
@@ -21,6 +25,7 @@ pub struct LogState {
     pub recording: bool,
     pub samples: u64,
     pub error: Option<String>,
+    pub ends_at_unix_ms: Option<u128>,
 }
 pub struct DiagnosticLog {
     state: Arc<Mutex<LogState>>,
@@ -41,39 +46,51 @@ fn write_record(writer: &mut impl Write, value: &Value) -> std::io::Result<u64> 
     Ok(bytes.len() as u64)
 }
 impl DiagnosticLog {
-    pub fn start(app: tauri::AppHandle) -> Self {
-        let state = Arc::new(Mutex::new(LogState::default()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let worker_state = state.clone();
-        let worker_stop = stop.clone();
-        let worker = thread::Builder::new()
-            .name("RoomWave-Diagnostics".into())
-            .spawn(move || {
-                if let Err(error) = record(app, &worker_state, &worker_stop) {
-                    let mut status = worker_state.lock().unwrap();
-                    status.recording = false;
-                    status.error = Some(error.to_string());
-                }
-            });
-        let worker = match worker {
-            Ok(worker) => Some(worker),
-            Err(error) => {
-                state.lock().unwrap().error = Some(error.to_string());
-                None
-            }
-        };
+    pub fn new() -> Self {
         Self {
-            state,
-            stop,
-            worker: Mutex::new(worker),
+            state: Arc::new(Mutex::new(LogState::default())),
+            stop: Arc::new(AtomicBool::new(false)),
+            worker: Mutex::new(None),
+        }
+    }
+    pub fn start(&self, app: tauri::AppHandle) -> Result<(), String> {
+        let mut worker = self.worker.lock().unwrap();
+        if worker.as_ref().is_some_and(|w| !w.is_finished()) {
+            return Ok(());
+        }
+        if let Some(previous) = worker.take() { let _ = previous.join(); }
+        self.stop.store(false, Ordering::Relaxed);
+        *self.state.lock().unwrap() = LogState {
+            recording: true,
+            ends_at_unix_ms: Some(unix_ms() + SESSION_DURATION.as_millis()),
+            ..LogState::default()
+        };
+        let state = self.state.clone();
+        let stop = self.stop.clone();
+        match thread::Builder::new().name("RoomWave-Diagnostics".into()).spawn(move || {
+            let result = record(app, &state, &stop);
+            let mut status = state.lock().unwrap();
+            status.recording = false;
+            status.ends_at_unix_ms = None;
+            if let Err(error) = result { status.error = Some(error.to_string()); }
+        }) {
+            Ok(handle) => { *worker = Some(handle); Ok(()) }
+            Err(error) => {
+                let mut status = self.state.lock().unwrap();
+                status.recording = false;
+                status.ends_at_unix_ms = None;
+                status.error = Some(error.to_string());
+                Err(error.to_string())
+            }
         }
     }
     pub fn snapshot(&self) -> LogState {
         self.state.lock().unwrap().clone()
     }
     pub fn stop(&self) {
+        let mut handle = self.worker.lock().unwrap();
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(worker) = self.worker.lock().unwrap().take() {
+        if let Some(worker) = handle.take() {
             let _ = worker.join();
         }
     }
@@ -106,7 +123,7 @@ fn record(
     }
     let clock = Instant::now();
     let mut last_mode_revision = None;
-    while !stop.load(Ordering::Relaxed) {
+    while session_active(stop.load(Ordering::Relaxed), clock.elapsed()) {
         // Copy state under short existing locks; serialize and write only after releasing them.
         // This worker runs even with the window minimized and never handles PCM buffers.
         let snapshot = app.state::<AudioSession>().snapshot();
@@ -135,13 +152,13 @@ fn record(
                 &mut writer,
                 &json!({"type":"session_end","unixMs":unix_ms(),"reason":"size_limit"}),
             )?;
-            return Err("Лог достиг лимита 64 МБ. Перезапустите хост для нового сеанса.".into());
+            return Err("Лог достиг лимита 64 МБ. Запустите новый сеанс при необходимости.".into());
         }
         thread::sleep(Duration::from_millis(500));
     }
     write_record(
         &mut writer,
-        &json!({"type":"session_end","unixMs":unix_ms(),"elapsedMs":clock.elapsed().as_millis(),"reason":"application_exit"}),
+        &json!({"type":"session_end","unixMs":unix_ms(),"elapsedMs":clock.elapsed().as_millis(),"reason":if stop.load(Ordering::Relaxed) { "stopped" } else { "time_limit" }}),
     )?;
     state.lock().unwrap().recording = false;
     Ok(())
@@ -149,6 +166,22 @@ fn record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn session_stops_at_deadline_or_manual_stop() {
+        assert!(session_active(false, SESSION_DURATION - Duration::from_millis(1)));
+        assert!(!session_active(false, SESSION_DURATION));
+        assert!(!session_active(false, SESSION_DURATION + Duration::from_secs(1)));
+        assert!(!session_active(true, Duration::ZERO));
+    }
+    #[test]
+    fn logging_is_idle_until_requested() {
+        let log = DiagnosticLog::new();
+        assert!(!log.snapshot().recording);
+        assert!(log.snapshot().path.is_none());
+        assert!(log.worker.lock().unwrap().is_none());
+        log.stop();
+        log.stop();
+    }
     #[test]
     fn records_are_independently_readable_json_lines() {
         let mut bytes = Vec::new();
