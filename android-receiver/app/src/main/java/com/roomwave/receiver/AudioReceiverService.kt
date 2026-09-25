@@ -30,6 +30,10 @@ class AudioReceiverService : Service() {
         private set
     var connection by mutableStateOf("Ожидание подключения ПК")
         private set
+    var channelLabel by mutableStateOf<String?>(null)
+        private set
+    var preparing by mutableStateOf(false)
+        private set
     var connected by mutableStateOf(false)
         private set
     var streamError by mutableStateOf<String?>(null)
@@ -93,7 +97,7 @@ class AudioReceiverService : Service() {
                 } finally {
                     try { socket.close() } catch (_: Exception) { }
                     client = null
-                    main.post { latencyReport = LatencyReport(null, null, null); syncReport = SyncReport("disconnected") }
+                    main.post { preparing = false; channelLabel = null; latencyReport = LatencyReport(null, null, null); syncReport = SyncReport("disconnected") }
                     status("Ожидание подключения ПК")
                 }
             }
@@ -102,6 +106,12 @@ class AudioReceiverService : Service() {
         } finally {
             try { server?.close() } catch (e: Exception) { Log.e(TAG, "Server close failed", e) }
         }
+    }
+    private fun readChannel(message: JSONObject): String? {
+        val routing = message.optJSONObject("routing") ?: return null
+        if (!routing.has("speaker")) return null
+        val speaker = if (routing.isNull("speaker")) null else routing.optInt("speaker", -1)
+        return channelDescription(speaker, routing.optBoolean("available", true))
     }
     private fun session(socket: Socket) {
         socket.soTimeout = 1000
@@ -135,6 +145,8 @@ class AudioReceiverService : Service() {
         }
         val id = hello.getString("sessionId").toLong()
         check(id > 0) { "Invalid session" }
+        main.post { preparing = true; streamError = null; syncReport = SyncReport() }
+        status("Подключение к компьютеру…", isConnected = true)
         check(audioManager.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) { "Audio focus denied" }
         val wake = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RoomWave:Playback")
         @Suppress("DEPRECATION")
@@ -143,28 +155,38 @@ class AudioReceiverService : Service() {
             wake.setReferenceCounted(false)
             wake.acquire(60_000L)
             wifi.acquire()
+            DeviceDiagnostics(this, { wake.isHeld }, { wifi.isHeld }).use { deviceDiagnostics ->
             PcmPlayer(id, socket.inetAddress, hello.optInt("targetDelayMs", 500)) { error ->
                 Log.e(TAG, "Audio playback failed", error)
                 main.post { streamError = error.message }
                 disconnect()
             }.use { player ->
                 player.start()
-                main.post { streamError = null; packets = 0; lost = 0; latencyReport = LatencyReport(null, null, null); syncReport = SyncReport() }
-                status("Подключено: ${socket.inetAddress.hostAddress}", isConnected = true)
+                val initialChannel = readChannel(hello)
+                main.post { preparing = true; channelLabel = initialChannel; streamError = null; packets = 0; lost = 0; latencyReport = LatencyReport(null, null, null); syncReport = SyncReport() }
+                status("Подключение к компьютеру…", isConnected = true)
                 Log.i(TAG, "audio connected session=$id host=${socket.inetAddress.hostAddress}")
-                reply(JSONObject().put("type", "ready").put("sessionId", id.toString()).put("extendedTiming", true).put("monoPcm", true))
+                reply(JSONObject().put("type", "ready").put("sessionId", id.toString()).put("extendedTiming", true).put("monoPcm", true).put("xorFec", true).put("pcm16k", true))
+                var playbackReady = false
                 while (running.get()) {
                     val message = readMessage() ?: break
                     when (message.optString("type")) {
                         "stop" -> break
                         "ping" -> {
                             val receiveNs = lastMessage
+                            val updatedChannel = readChannel(message)
                             wake.acquire(60_000L)
                             player.syncClock(message.optString("clockOffsetNs").toLongOrNull(),
                                 message.optDouble("rttMs").takeIf { it.isFinite() }, receiveNs)
                             val report = player.latency.report(System.nanoTime())
                             val synchronization = player.synchronization.get()
-                            val stageReport = player.stageReport()
+                            val readyNow = synchronization.status == "synced"
+                            if (readyNow && !playbackReady) {
+                                playbackReady = true
+                                main.post { preparing = false }
+                                status("Подключено: ${socket.inetAddress.hostAddress}", isConnected = true)
+                            }
+                            val stageReport = JSONObject(player.stageReport().toString()).put("deviceState",deviceDiagnostics.snapshot())
                             val receivedPackets = player.packets.get()
                             val missingPackets = player.lost.get()
                             val pong = JSONObject().put("type", "pong").put("packets", receivedPackets)
@@ -183,12 +205,13 @@ class AudioReceiverService : Service() {
                                 Log.i(TAG, "stages=$stageReport sync=${synchronization.status} errorMs=${synchronization.errorMs} latencyMs=${report.latencyMs} rttMs=${report.rttMs} packets=$receivedPackets lost=$missingPackets")
                                 lastStatsLog = receiveNs
                             }
-                            main.post { packets = receivedPackets; lost = missingPackets; latencyReport = report; syncReport = synchronization; stageMetrics = stageReport }
+                            main.post { if (updatedChannel != null) channelLabel = updatedChannel; packets = receivedPackets; lost = missingPackets; latencyReport = report; syncReport = synchronization; stageMetrics = stageReport }
                         }
                         else -> error("Unexpected control message")
                     }
                 }
                 Log.i(TAG, "audio disconnected session=$id packets=${player.packets.get()} playedFrames=${player.playedFrames.get()} lost=${player.lost.get()}")
+            }
             }
         } finally {
             if (wifi.isHeld) wifi.release()

@@ -5,7 +5,7 @@ object NativeAudio {
     init { System.loadLibrary("roomwave_audio") }
     external fun open(): Long
     external fun clock(handle: Long, offset: Long, at: Long)
-    external fun push(handle: Long, frame: Long, capture: Long, send: Long, play: Long, receive: Long, pcm: ByteArray): Boolean
+    external fun push(handle: Long, frame: Long, capture: Long, send: Long, play: Long, receive: Long, pcm: ByteArray, repairKind: Int, sampleRate: Int): Boolean
     external fun poll(handle: Long): DoubleArray
     external fun close(handle: Long)
 }

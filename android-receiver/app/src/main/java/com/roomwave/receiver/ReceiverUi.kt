@@ -51,6 +51,8 @@ fun RoomWaveApp(onStart: () -> Unit) {
                     running = service != null,
                     ready = advertiser?.registered == true,
                     connected = service?.connected == true,
+                    preparing = service?.preparing == true,
+                    channel = service?.channelLabel,
                     hasError = service?.streamError != null || AudioReceiverService.lastError != null || advertiser?.error != null,
                     onStart = onStart,
                     onDisconnect = { service?.disconnect() },
@@ -77,7 +79,9 @@ private fun WaveMark(modifier: Modifier = Modifier, color: Color = Green) {
 @Composable
 private fun ReceiverScreen(
     name: String, running: Boolean, ready: Boolean, connected: Boolean, hasError: Boolean,
-    onStart: () -> Unit, onDisconnect: () -> Unit, onStop: () -> Unit, onDiagnostics: () -> Unit
+    channel: String? = null,
+    onStart: () -> Unit, onDisconnect: () -> Unit, onStop: () -> Unit, onDiagnostics: () -> Unit,
+    preparing: Boolean = false
 ) {
     var menu by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState())
@@ -95,25 +99,17 @@ private fun ReceiverScreen(
                 }
             }
         }
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("ВАША ЗВУКОВАЯ СИСТЕМА", color = Muted, fontSize = 10.sp, letterSpacing = 1.8.sp, fontWeight = FontWeight.Bold)
-            Text(if (connected) "Звук уже здесь." else "Телефон стал\nчастью комнаты.",
-                fontSize = 32.sp, lineHeight = 38.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-.8).sp)
-            Text("Системный звук компьютера — на твоём телефоне.", color = Muted, style = MaterialTheme.typography.bodyMedium)
-        }
         Surface(shape = RoundedCornerShape(24.dp), color = Color.White, modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Box(Modifier.size(102.dp).background(Soft, CircleShape), contentAlignment = Alignment.Center) {
-                    WaveMark(Modifier.size(46.dp), if (connected) Green else Color(0xFF8FA48E))
-                }
-                Text(when { !running -> "Приёмник выключен"; connected -> "Подключён к компьютеру";
+                Text(when { !running -> "Приёмник выключен"; preparing -> "Подключение…"; connected -> "Подключён к компьютеру";
                     ready -> "Готов к подключению"; else -> "Готовим подключение" },
                     style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                 Text(when { !running -> "Включи приёмник, чтобы компьютер мог найти этот телефон."
-                    connected -> "Каналы и устройства можно выбрать в RoomWave на компьютере."
+                    preparing -> "Синхронизируем звук с компьютером. Дождись завершения подключения."
+                    connected -> "Канал выбирается на компьютере."
                     ready -> "Выбери этот телефон в RoomWave на компьютере."
-                    else -> "Подключи телефон и компьютер к одной сети Wi-Fi. Мы найдём друг друга автоматически." },
+                    else -> "Подключи телефон и компьютер к одной сети Wi-Fi." },
                     color = Muted, style = MaterialTheme.typography.bodyMedium, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
                 Surface(color = Page, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -121,6 +117,8 @@ private fun ReceiverScreen(
                         Text(name, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.bodyLarge)
                     }
                 }
+                if (preparing) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                if (connected) Text("Канал: ${channel ?: "Не указан хостом"}", style = MaterialTheme.typography.titleMedium, color = Green)
                 if (!running) Button(onClick = onStart, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(12.dp)) { Text("Включить приёмник") }
                 else if (connected) OutlinedButton(onClick = onDisconnect, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(12.dp)) { Text("Отключиться от компьютера") }
             }
@@ -132,31 +130,12 @@ private fun ReceiverScreen(
                 TextButton(onClick = onDiagnostics) { Text("Посмотреть причину") }
             }
         }
-        if (!connected) Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("Всего два шага", fontWeight = FontWeight.SemiBold)
-            SetupStep("1", "Одна сеть Wi-Fi", "Телефон и компьютер должны быть в одной сети.")
-            SetupStep("2", "Выбери телефон на ПК", "Нажми «Подключить» и назначь нужный канал.")
-        }
-        Surface(color = Soft, shape = RoundedCornerShape(16.dp)) {
-            Text(if (connected) "Можно свернуть приложение и выключить экран — звук продолжит играть. Громкость регулируется кнопками телефона."
-                else "Когда подключишься, звук будет играть даже со свёрнутым приложением и выключенным экраном.",
+        if (running) Surface(color = Soft, shape = RoundedCornerShape(16.dp)) {
+            Text(if (connected && !preparing) "Фоновое воспроизведение включено. Громкость — кнопками телефона."
+                else "Приём звука работает в фоне.",
                 Modifier.padding(18.dp), color = Green, style = MaterialTheme.typography.bodySmall)
         }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("Один звук. Вся комната.", Modifier.weight(1f), fontSize = 11.sp, color = Muted)
-            TextButton(onClick = onDiagnostics) { Text("Диагностика", fontSize = 12.sp) }
-        }
-    }
-}
 
-@Composable
-private fun SetupStep(number: String, heading: String, detail: String) {
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Box(Modifier.size(28.dp).background(Soft, CircleShape), contentAlignment = Alignment.Center) { Text(number, color = Green, fontSize = 12.sp) }
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(heading, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-            Text(detail, style = MaterialTheme.typography.bodySmall, color = Muted)
-        }
     }
 }
 
@@ -224,12 +203,12 @@ private fun DiagnosticGroup(heading: String, rows: List<Pair<String, String>>) {
 
 @Preview(showBackground = true, widthDp = 360, heightDp = 800)
 @Composable
-private fun ReadyPreview() { RoomWaveTheme { ReceiverScreen("Samsung S20 FE", true, true, false, false, {}, {}, {}, {}) } }
+private fun ReadyPreview() { RoomWaveTheme { ReceiverScreen("Samsung S20 FE", true, true, false, false, null, {}, {}, {}, {}) } }
 
 @Preview(showBackground = true, widthDp = 360, heightDp = 800)
 @Composable
-private fun ConnectedPreview() { RoomWaveTheme { ReceiverScreen("Samsung S20 FE", true, true, true, false, {}, {}, {}, {}) } }
+private fun ConnectedPreview() { RoomWaveTheme { ReceiverScreen("Samsung S20 FE", true, true, true, false, "Задний левый · BL", {}, {}, {}, {}) } }
 
 @Preview(showBackground = true, widthDp = 320, heightDp = 640, fontScale = 1.3f)
 @Composable
-private fun StoppedPreview() { RoomWaveTheme { ReceiverScreen("Xiaomi", false, false, false, false, {}, {}, {}, {}) } }
+private fun StoppedPreview() { RoomWaveTheme { ReceiverScreen("Xiaomi", false, false, false, false, null, {}, {}, {}, {}) } }

@@ -6,6 +6,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PcmPacketTest {
+    @Test fun reusedPcmBufferOverwritesEverySampleAndDefaultDecodeKeepsOwnership() {
+        val scratch = ByteArray(960) { 42 }
+        val first = PcmPlayer.decode(packet(),1008,123,scratch)!!
+        assertSame(scratch,first.pcm)
+        assertArrayEquals(ByteArray(960) { 7 },scratch)
+        val independent = PcmPlayer.decode(packet(),1008,123)!!
+        val next = packet().also { for(i in 48 until it.size) it[i] = 3 }
+        assertSame(scratch,PcmPlayer.decode(next,1008,123,scratch)!!.pcm)
+        assertArrayEquals(ByteArray(960) { 3 },scratch)
+        assertArrayEquals(ByteArray(960) { 7 },independent.pcm)
+        assertNull(PcmPlayer.decode(next,1008,123,ByteArray(959)))
+    }
     @Test fun monoPacketDrivesBothOutputChannelsWithoutChangingTiming() {
         val wire=ByteBuffer.allocate(544).order(ByteOrder.BIG_ENDIAN).apply {
             putInt(0x52574156); put(byteArrayOf(4,1,1,1)); putLong(123); putInt(5)

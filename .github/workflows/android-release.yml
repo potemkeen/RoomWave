@@ -1,0 +1,126 @@
+name: Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['android-v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Validate version
+        id: version
+        env:
+          BUILD_REF: ${{ github.ref }}
+          BUILD_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re
+          source = pathlib.Path('android-receiver/app/build.gradle.kts').read_text()
+          version = re.search(r'versionName = "(\d+\.\d+\.\d+)"', source).group(1)
+          code = int(re.search(r'versionCode = (\d+)', source).group(1))
+          assert code > 0
+          if os.environ['BUILD_REF'].startswith('refs/tags/'):
+              assert os.environ['BUILD_TAG'] == f'android-v{version}', 'Tag/version mismatch'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'version={version}\n')
+          PY
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Install Android build tools
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            'platforms;android-35' 'build-tools;35.0.0' 'ndk;28.2.13676358' 'cmake;3.22.1'
+      - name: Test, lint and build release APK
+        working-directory: android-receiver
+        run: bash ./gradlew --no-daemon testReleaseUnitTest lintRelease assembleRelease
+      - name: Sign and verify APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          : "${ANDROID_KEYSTORE_BASE64:?Signing key is not configured}"
+          : "${ANDROID_KEYSTORE_PASSWORD:?Missing password}"
+          : "${ANDROID_KEY_ALIAS:?Missing alias}"
+          : "${ANDROID_KEY_PASSWORD:?Missing key password}"
+          umask 077
+          key="$RUNNER_TEMP/roomwave-release.jks"
+          trap 'rm -f -- "$key"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$key"
+          mkdir -p dist/android
+          apk="dist/android/RoomWave-$APP_VERSION-android.apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+            --ks "$key" --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "$apk" android-receiver/app/build/outputs/apk/release/app-release-unsigned.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee "$RUNNER_TEMP/apk-signature.txt"
+          expected=$(tr -d '\r\n' < android-receiver/release-certificate.sha256)
+          grep -F "Signer #1 certificate SHA-256 digest: $expected" "$RUNNER_TEMP/apk-signature.txt"
+          cd dist/android
+          sha256sum "RoomWave-$APP_VERSION-android.apk" > "RoomWave-$APP_VERSION-android.apk.sha256"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: android-apk
+          path: dist/android/RoomWave-*.apk*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Save test and lint reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: android-reports
+          path: android-receiver/app/build/reports/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/android-v')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: android-apk
+          path: release-assets
+      - name: Publish Android release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          APP_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum --check "RoomWave-$APP_VERSION-android.apk.sha256"
+          gh release create "$RELEASE_TAG" \
+            "RoomWave-$APP_VERSION-android.apk" "RoomWave-$APP_VERSION-android.apk.sha256" \
+            --verify-tag --draft --title "RoomWave $APP_VERSION — Android" \
+            --notes-file ../android-receiver/ReleaseNotes.md
+          gh release edit "$RELEASE_TAG" --draft=false --latest=false
