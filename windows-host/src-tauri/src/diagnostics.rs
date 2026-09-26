@@ -58,7 +58,9 @@ impl DiagnosticLog {
         if worker.as_ref().is_some_and(|w| !w.is_finished()) {
             return Ok(());
         }
-        if let Some(previous) = worker.take() { let _ = previous.join(); }
+        if let Some(previous) = worker.take() {
+            let _ = previous.join();
+        }
         self.stop.store(false, Ordering::Relaxed);
         *self.state.lock().unwrap() = LogState {
             recording: true,
@@ -67,14 +69,21 @@ impl DiagnosticLog {
         };
         let state = self.state.clone();
         let stop = self.stop.clone();
-        match thread::Builder::new().name("RoomWave-Diagnostics".into()).spawn(move || {
-            let result = record(app, &state, &stop);
-            let mut status = state.lock().unwrap();
-            status.recording = false;
-            status.ends_at_unix_ms = None;
-            if let Err(error) = result { status.error = Some(error.to_string()); }
-        }) {
-            Ok(handle) => { *worker = Some(handle); Ok(()) }
+        match thread::Builder::new()
+            .name("RoomWave-Diagnostics".into())
+            .spawn(move || {
+                let result = record(app, &state, &stop);
+                let mut status = state.lock().unwrap();
+                status.recording = false;
+                status.ends_at_unix_ms = None;
+                if let Err(error) = result {
+                    status.error = Some(error.to_string());
+                }
+            }) {
+            Ok(handle) => {
+                *worker = Some(handle);
+                Ok(())
+            }
             Err(error) => {
                 let mut status = self.state.lock().unwrap();
                 status.recording = false;
@@ -168,9 +177,15 @@ mod tests {
     use super::*;
     #[test]
     fn session_stops_at_deadline_or_manual_stop() {
-        assert!(session_active(false, SESSION_DURATION - Duration::from_millis(1)));
+        assert!(session_active(
+            false,
+            SESSION_DURATION - Duration::from_millis(1)
+        ));
         assert!(!session_active(false, SESSION_DURATION));
-        assert!(!session_active(false, SESSION_DURATION + Duration::from_secs(1)));
+        assert!(!session_active(
+            false,
+            SESSION_DURATION + Duration::from_secs(1)
+        ));
         assert!(!session_active(true, Duration::ZERO));
     }
     #[test]

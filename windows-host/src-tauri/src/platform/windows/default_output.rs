@@ -484,60 +484,103 @@ fn guardian() -> Res<()> {
     Ok(())
 }
 pub fn guardian_entry() -> bool {
-    if let Some(path) = std::env::args().skip_while(|a| a != "--restore-install-output").nth(1) {
+    if let Some(path) = std::env::args()
+        .skip_while(|a| a != "--restore-install-output")
+        .nth(1)
+    {
         let result = (|| -> Res<()> {
             let snapshot: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
-            let defaults = snapshot["defaults"].as_array().ok_or("Invalid audio snapshot")?;
-            unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()?; }
-            let e: IMMDeviceEnumerator = unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
+            let defaults = snapshot["defaults"]
+                .as_array()
+                .ok_or("Invalid audio snapshot")?;
+            unsafe {
+                CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
+            }
+            let e: IMMDeviceEnumerator =
+                unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
             let virtual_id = find_virtual(&e)?.ok_or("Virtual endpoint unavailable")?;
             for role in 0..3 {
                 if let Some(previous) = defaults.get(role).and_then(|v| v.as_str()) {
                     // Undo only the driver's automatic takeover, never an intervening user choice.
-                    if previous != virtual_id && current(&e, role as i32).as_deref() == Some(&virtual_id)
-                        && present(&e, previous) {
+                    if previous != virtual_id
+                        && current(&e, role as i32).as_deref() == Some(&virtual_id)
+                        && present(&e, previous)
+                    {
                         set_default(previous, role as i32)?;
                     }
                 }
             }
             Ok(())
         })();
-        if let Err(e) = result { eprintln!("Restore installation output: {e}"); std::process::exit(1); }
+        if let Err(e) = result {
+            eprintln!("Restore installation output: {e}");
+            std::process::exit(1);
+        }
         return true;
     }
     if std::env::args().any(|a| a == "--configure-vbcable") {
         let result = (|| -> Res<()> {
-            unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()?; }
-            let e: IMMDeviceEnumerator = unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
+            unsafe {
+                CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
+            }
+            let e: IMMDeviceEnumerator =
+                unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
             let id = find_virtual(&e)?.ok_or("VB-CABLE speaker endpoint is not available; restart Windows after driver installation")?;
             let device = unsafe { e.GetDevice(&windows::core::HSTRING::from(&id))? };
             let store = unsafe { device.OpenPropertyStore(STGM_READ)? };
-            let mut property = unsafe { store.GetValue(&PROPERTYKEY {
-                fmtid: GUID::from_u128(0xa8b865dd_2e3d_4094_ad97_e593a70c75d6), pid: 8,
-            })? };
-            let driver = unsafe { PropVariantToStringAlloc(&property) }.map(|p| unsafe { take_string(p) });
-            unsafe { PropVariantClear(&mut property)?; }
-            if driver?.as_str() != "VBAudioVACWDM" { return Err("Refusing to configure a non VB-CABLE endpoint".into()); }
+            let mut property = unsafe {
+                store.GetValue(&PROPERTYKEY {
+                    fmtid: GUID::from_u128(0xa8b865dd_2e3d_4094_ad97_e593a70c75d6),
+                    pid: 8,
+                })?
+            };
+            let driver =
+                unsafe { PropVariantToStringAlloc(&property) }.map(|p| unsafe { take_string(p) });
+            unsafe {
+                PropVariantClear(&mut property)?;
+            }
+            if driver?.as_str() != "VBAudioVACWDM" {
+                return Err("Refusing to configure a non VB-CABLE endpoint".into());
+            }
             let (before, rate) = crate::layout::read_endpoint(&id)?;
-            let changed = before.channel_mask != 0x63f || before.channel_count != 8 || rate != 48000;
+            let changed =
+                before.channel_mask != 0x63f || before.channel_count != 8 || rate != 48000;
             if changed {
-                let format = wasapi::WaveFormat::new(16,16,&wasapi::SampleType::Int,48000,8,Some(0x63f));
+                let format = wasapi::WaveFormat::new(
+                    16,
+                    16,
+                    &wasapi::SampleType::Int,
+                    48000,
+                    8,
+                    Some(0x63f),
+                );
                 let policy = policy_client()?;
                 let wide: Vec<u16> = id.encode_utf16().chain(Some(0)).collect();
                 unsafe {
                     let table = *(policy.as_raw() as *const *const PolicyVtable);
-                    ((*table).set_device_format)(policy.as_raw(), PCWSTR(wide.as_ptr()),
-                        format.as_waveformatex_ref(), format.as_waveformatex_ref()).ok()?;
+                    ((*table).set_device_format)(
+                        policy.as_raw(),
+                        PCWSTR(wide.as_ptr()),
+                        format.as_waveformatex_ref(),
+                        format.as_waveformatex_ref(),
+                    )
+                    .ok()?;
                 }
             }
             let (after, rate) = crate::layout::read_endpoint(&id)?;
             if after.channel_mask != 0x63f || after.channel_count != 8 || rate != 48000 {
                 return Err("VB-CABLE format verification failed".into());
             }
-            println!("{}", serde_json::json!({"endpoint":id,"changed":changed,"layout":after,"sampleRate":rate}));
+            println!(
+                "{}",
+                serde_json::json!({"endpoint":id,"changed":changed,"layout":after,"sampleRate":rate})
+            );
             Ok(())
         })();
-        if let Err(e) = result { eprintln!("VB-CABLE configuration failed: {e}"); std::process::exit(1); }
+        if let Err(e) = result {
+            eprintln!("VB-CABLE configuration failed: {e}");
+            std::process::exit(1);
+        }
         return true;
     }
     if std::env::args().any(|a| a == "--probe-virtual-audio") {

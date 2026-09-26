@@ -1,5 +1,5 @@
-use serde::Serialize;
 pub use crate::platform::read_endpoint;
+use serde::Serialize;
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -1,5 +1,5 @@
 //! Shared serialized configuration/state. Preserve field names for UI and saved settings.
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]

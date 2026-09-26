@@ -105,56 +105,72 @@ mod tests {
         use super::*;
         wasapi::initialize_mta().ok()?;
         let source = std::env::var("ROOMWAVE_PROBE_ENDPOINT")?;
-        let target = std::env::var("ROOMWAVE_PROBE_CAPTURE_ENDPOINT").unwrap_or_else(|_|source.clone());
-        let (layout,_) = crate::layout::read_endpoint(&source)?;
-        let e=DeviceEnumerator::new()?;
-        let f=WaveFormat::new(16,16,&SampleType::Int,48000,layout.channel_count,Some(layout.channel_mask));
-        let mut r=e.get_device(&source)?.get_iaudioclient()?;
-        let mut c=e.get_device(&target)?.get_iaudioclient()?;
-        let mode=StreamMode::EventsShared{autoconvert:true,buffer_duration_hns:200_000};
-        r.initialize_client(&f,&Direction::Render,&mode)?;
-        c.initialize_client(&f,&Direction::Capture,&mode)?;
-        let _re=r.set_get_eventhandle()?;
-        let _ce=c.set_get_eventhandle()?;
-        let render=r.get_audiorenderclient()?;
-        let capture=c.get_audiocaptureclient()?;
-        let align=layout.channel_count*2;
-        let mut rb=vec![0;r.get_buffer_size()? as usize*align];
-        let mut cb=vec![0;c.get_buffer_size()? as usize*align];
-        let mut sent=std::collections::VecDeque::new();
-        let mut delays=Vec::new();
-        let mut frame=0usize;
-        let mut last_high=false;
+        let target =
+            std::env::var("ROOMWAVE_PROBE_CAPTURE_ENDPOINT").unwrap_or_else(|_| source.clone());
+        let (layout, _) = crate::layout::read_endpoint(&source)?;
+        let e = DeviceEnumerator::new()?;
+        let f = WaveFormat::new(
+            16,
+            16,
+            &SampleType::Int,
+            48000,
+            layout.channel_count,
+            Some(layout.channel_mask),
+        );
+        let mut r = e.get_device(&source)?.get_iaudioclient()?;
+        let mut c = e.get_device(&target)?.get_iaudioclient()?;
+        let mode = StreamMode::EventsShared {
+            autoconvert: true,
+            buffer_duration_hns: 200_000,
+        };
+        r.initialize_client(&f, &Direction::Render, &mode)?;
+        c.initialize_client(&f, &Direction::Capture, &mode)?;
+        let _re = r.set_get_eventhandle()?;
+        let _ce = c.set_get_eventhandle()?;
+        let render = r.get_audiorenderclient()?;
+        let capture = c.get_audiocaptureclient()?;
+        let align = layout.channel_count * 2;
+        let mut rb = vec![0; r.get_buffer_size()? as usize * align];
+        let mut cb = vec![0; c.get_buffer_size()? as usize * align];
+        let mut sent = std::collections::VecDeque::new();
+        let mut delays = Vec::new();
+        let mut frame = 0usize;
+        let mut last_high = false;
         c.start_stream()?;
         r.start_stream()?;
-        let start=Instant::now();
-        while start.elapsed()<Duration::from_secs(4) {
-            let count=r.get_available_space_in_frames()? as usize;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(4) {
+            let count = r.get_available_space_in_frames()? as usize;
             rb.fill(0);
-            let mut markers=0;
+            let mut markers = 0;
             for n in 0..count {
                 // One isolated impulse every 100 ms, after a 500 ms warmup.
-                if frame+n>=24000 && (frame+n)%4800==0 {
-                    rb[n*align..n*align+2].copy_from_slice(&12000i16.to_le_bytes());
-                    markers+=1;
+                if frame + n >= 24000 && (frame + n) % 4800 == 0 {
+                    rb[n * align..n * align + 2].copy_from_slice(&12000i16.to_le_bytes());
+                    markers += 1;
                 }
             }
-            if count>0 {
-                let now=Instant::now();
-                render.write_to_device(count,&rb[..count*align],None)?;
-                for _ in 0..markers {sent.push_back(now);}
-                frame+=count;
+            if count > 0 {
+                let now = Instant::now();
+                render.write_to_device(count, &rb[..count * align], None)?;
+                for _ in 0..markers {
+                    sent.push_back(now);
+                }
+                frame += count;
             }
-            while capture.get_next_packet_size()?.unwrap_or(0)>0 {
-                let (count,_)=capture.read_from_device(&mut cb)?;
-                let now=Instant::now();
-                for f in cb[..count as usize*align].chunks_exact(align) {
-                    let high=i16::from_le_bytes([f[0],f[1]])>8000;
+            while capture.get_next_packet_size()?.unwrap_or(0) > 0 {
+                let (count, _) = capture.read_from_device(&mut cb)?;
+                let now = Instant::now();
+                for f in cb[..count as usize * align].chunks_exact(align) {
+                    let high = i16::from_le_bytes([f[0], f[1]]) > 8000;
                     if high && !last_high {
-                        if let Some(t)=sent.pop_front() {delays.push(now.duration_since(t).as_secs_f64()*1000.);}
-                        else {return Err("Unexpected signal; close players before measuring".into());}
+                        if let Some(t) = sent.pop_front() {
+                            delays.push(now.duration_since(t).as_secs_f64() * 1000.);
+                        } else {
+                            return Err("Unexpected signal; close players before measuring".into());
+                        }
                     }
-                    last_high=high;
+                    last_high = high;
                 }
             }
             thread::sleep(Duration::from_millis(1));
@@ -162,8 +178,11 @@ mod tests {
         r.stop_stream()?;
         c.stop_stream()?;
         delays.sort_by(f64::total_cmp);
-        println!("{}",serde_json::json!({"source":source,"capture":target,"scope":"render-enqueue-to-capture-read (includes render padding)","samples":delays.len(),"minMs":delays.first(),"medianMs":delays.get(delays.len()/2),"p95Ms":delays.get(delays.len().saturating_sub(1)*95/100)}));
-        assert!(delays.len()>=25,"Insufficient returned impulses");
+        println!(
+            "{}",
+            serde_json::json!({"source":source,"capture":target,"scope":"render-enqueue-to-capture-read (includes render padding)","samples":delays.len(),"minMs":delays.first(),"medianMs":delays.get(delays.len()/2),"p95Ms":delays.get(delays.len().saturating_sub(1)*95/100)})
+        );
+        assert!(delays.len() >= 25, "Insufficient returned impulses");
         Ok(())
     }
     #[test]
@@ -211,7 +230,11 @@ mod tests {
                 (layout.channel_count, false, true),
             ] {
                 let target = id.clone();
-                let mask = if channels == 2 { 3 } else { layout.channel_mask };
+                let mask = if channels == 2 {
+                    3
+                } else {
+                    layout.channel_mask
+                };
                 let render = thread::spawn(move || -> Result<(), String> {
                     let run = || -> Result<(), Box<dyn std::error::Error>> {
                         wasapi::initialize_mta().ok()?;
@@ -224,14 +247,7 @@ mod tests {
                         } else {
                             SampleType::Int
                         };
-                        let f = WaveFormat::new(
-                            bits,
-                            bits,
-                            &kind,
-                            48000,
-                            channels,
-                            Some(mask),
-                        );
+                        let f = WaveFormat::new(bits, bits, &kind, 48000, channels, Some(mask));
                         a.initialize_client(
                             &f,
                             &Direction::Render,

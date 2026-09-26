@@ -1,20 +1,22 @@
 // Release builds are desktop applications; diagnostic modes still support redirected stdout.
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 
-mod platform;
 mod audio_types;
-use platform::{default_output, local_test, windows_audio, virtual_probe};
+mod platform;
+use platform::{default_output, local_test, virtual_probe, windows_audio};
 mod audio;
 
 mod diagnostics;
-mod error_log;
 mod discovery;
+mod error_log;
 mod fec;
 mod layout;
 
 mod timing;
 mod transport_stats;
-
 
 use audio::{AudioSession, AudioState};
 use discovery::{Discovery, DiscoverySnapshot};
@@ -35,7 +37,10 @@ fn get_diagnostic_log_state(
 }
 
 #[tauri::command]
-fn start_diagnostic_log(app: tauri::AppHandle, log: tauri::State<'_, diagnostics::DiagnosticLog>) -> Result<(), String> {
+fn start_diagnostic_log(
+    app: tauri::AppHandle,
+    log: tauri::State<'_, diagnostics::DiagnosticLog>,
+) -> Result<(), String> {
     log.start(app)
 }
 #[tauri::command]
@@ -44,7 +49,10 @@ fn stop_diagnostic_log(log: tauri::State<'_, diagnostics::DiagnosticLog>) {
 }
 #[tauri::command]
 fn reveal_diagnostic_log(log: tauri::State<'_, diagnostics::DiagnosticLog>) -> Result<(), String> {
-    let path = log.snapshot().path.ok_or("Сначала запишите диагностический сеанс")?;
+    let path = log
+        .snapshot()
+        .path
+        .ok_or("Сначала запишите диагностический сеанс")?;
     platform::reveal_file(std::path::Path::new(&path)).map_err(|e| e.to_string())
 }
 

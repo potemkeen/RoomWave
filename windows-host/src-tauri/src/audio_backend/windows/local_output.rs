@@ -1,7 +1,7 @@
 use super::*;
 use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
 
-pub use crate::audio_types::{Config, State, Endpoint};
+pub use crate::audio_types::{Config, Endpoint, State};
 pub fn endpoints() -> Res<Vec<Endpoint>> {
     let collection = DeviceEnumerator::new()?.get_device_collection(&Direction::Render)?;
     let mut result = Vec::new();
@@ -268,7 +268,9 @@ fn run(stop: &AtomicBool, hub: &Hub, config: &Config) -> Res<()> {
                 continue;
             }
             let work_started = Instant::now();
-            if free == capacity { empty_padding_observations += 1; }
+            if free == capacity {
+                empty_padding_observations += 1;
+            }
             max_queue_frames = max_queue_frames.max(queue.len() * FRAMES);
             let now = host_clock.now();
             let (position, qpc) = clock.get_position()?;
@@ -297,8 +299,13 @@ fn run(stop: &AtomicBool, hub: &Hub, config: &Config) -> Res<()> {
             // A sole PC sink has no peer deadline to wait for. A gentle FIFO
             // servo compensates capture/output clock drift without a fixed wait.
             let available = queue.len() as f64 * FRAMES as f64
-                + if current.is_some() { FRAMES as f64 - cursor } else { 0. };
-            let desired_rate = 1. + ((available - free as f64 - FRAMES as f64) / 48000.).clamp(-0.001, 0.001);
+                + if current.is_some() {
+                    FRAMES as f64 - cursor
+                } else {
+                    0.
+                };
+            let desired_rate =
+                1. + ((available - free as f64 - FRAMES as f64) / 48000.).clamp(-0.001, 0.001);
             local_rate += (desired_rate - local_rate) * 0.02;
             bytes[..free * align].fill(0);
             for n in 0..free {
@@ -320,7 +327,9 @@ fn run(stop: &AtomicBool, hub: &Hub, config: &Config) -> Res<()> {
                 if let Some(b) = &current {
                     let error = if remote {
                         (presentation - b.play_ns as i128) as f64 - cursor * 1e9 / 48000.
-                    } else { 0. };
+                    } else {
+                        0.
+                    };
                     phase = error / 1e6;
                     if error > 20e6 {
                         gain = (gain - 1. / 240.).max(0.);
@@ -344,7 +353,11 @@ fn run(stop: &AtomicBool, hub: &Hub, config: &Config) -> Res<()> {
                             );
                         }
                         latency = Some((presentation - b.read_ns as i128) as f64 / 1e6);
-                        step = if remote { 1. + (error / 1e9).clamp(-0.005, 0.005) } else { local_rate };
+                        step = if remote {
+                            1. + (error / 1e9).clamp(-0.005, 0.005)
+                        } else {
+                            local_rate
+                        };
                     }
                 } else {
                     empty_source_frames += 1;

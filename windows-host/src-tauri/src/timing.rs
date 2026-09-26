@@ -1,5 +1,5 @@
-use std::collections::VecDeque;
 pub use crate::platform::Clock;
+use std::collections::VecDeque;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ClockSample {

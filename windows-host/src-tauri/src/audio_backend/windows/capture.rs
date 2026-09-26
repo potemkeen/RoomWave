@@ -324,10 +324,8 @@ fn capture_endpoint(stop: &AtomicBool, hub: &Hub, timeline: &mut (u64, i64)) -> 
                 // A single host budget keeps all receivers on one timeline. Limit rate
                 // Rising budget: 0.3%, below the renderers' 0.5% correction limit.
                 // Reductions remain at 0.1%; no deadline jumps on an audible stream.
-                hub.delay_ns.store(
-                    next_playout_budget(current, requested),
-                    Ordering::Relaxed,
-                );
+                hub.delay_ns
+                    .store(next_playout_budget(current, requested), Ordering::Relaxed);
                 budget_at = Instant::now();
             }
             // Capture wakes on the engine event and publishes complete 5 ms packets immediately.
