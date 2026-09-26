@@ -1,7 +1,25 @@
-use super::*;
-use std::collections::VecDeque;
+use crate::layout::{channel_index, test_sample, Layout};
+use crate::timing::Clock;
+
+use serde_json::json;
+
+use std::{
+    collections::VecDeque,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::{Duration, Instant},
+};
 
 use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
+
+use super::local_output;
+
+use super::super::{
+    next_playout_budget, AudioBlock, Hub, Res, FRAMES, PCM_BYTES, PERIOD_NS, PLAYOUT_NS,
+};
 
 pub(in crate::audio) fn capture_audio(stop: &AtomicBool, hub: &Hub) -> Res<()> {
     thread::scope(|scope| {

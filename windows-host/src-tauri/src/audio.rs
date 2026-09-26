@@ -1,6 +1,6 @@
 use crate::discovery::Device;
-use crate::layout::{channel_index, test_sample, Layout};
-use crate::timing::Clock;
+use crate::layout::Layout;
+
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
@@ -11,7 +11,7 @@ use std::{
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 #[path = "audio_backend/mod.rs"]
 mod backend;
