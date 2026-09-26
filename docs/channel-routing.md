@@ -59,3 +59,13 @@ packet rejection. Physical 5.1/7.1 switching and before/after LAN latency requir
 user's hardware run; no measured latency improvement or equality is claimed here.
 
 Mask ordering reference: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ksmedia/ns-ksmedia-waveformatextensible
+
+## Receiver channel label
+
+Protocol v4 `start` and `ping` messages optionally include `routing`:
+`{"speaker":16,"available":true}`. `speaker` is the assigned Windows speaker bit;
+null means the normal stereo stream. Availability is evaluated against the current
+capture layout. Heartbeats refresh the label after assignments or layouts change.
+This metadata does not change UDP PCM framing or playback scheduling. Older clients
+ignore it; a new client connected to an older host displays an unspecified channel.
+The receiver clears the label on disconnect.

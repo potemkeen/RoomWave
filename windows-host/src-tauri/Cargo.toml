@@ -2,6 +2,7 @@
 name = "roomwave-host"
 version = "0.1.1"
 description = "RoomWave LAN receiver discovery"
+license = "MIT"
 edition = "2021"
 
 [build-dependencies]
