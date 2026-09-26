@@ -1,4 +1,6 @@
 use super::*;
+use std::collections::VecDeque;
+
 use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
 
 pub(in crate::audio) fn capture_audio(stop: &AtomicBool, hub: &Hub) -> Res<()> {

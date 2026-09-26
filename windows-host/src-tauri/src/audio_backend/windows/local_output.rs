@@ -1,4 +1,6 @@
 use super::*;
+use std::collections::VecDeque;
+
 use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
 
 pub use crate::audio_types::{Config, Endpoint, State};
