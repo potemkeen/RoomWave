@@ -1,7 +1,7 @@
 [package]
 name = "roomwave-host"
 version = "0.1.1"
-description = "RoomWave LAN receiver discovery"
+description = "Multichannel audio streaming over a local network"
 license = "MIT"
 edition = "2021"
 
