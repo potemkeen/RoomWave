@@ -1,0 +1,12 @@
+RoomWave installs an application for streaming audio from a PC to phones.
+
+The package includes VB-CABLE by VB-Audio: https://vb-cable.com
+VB-CABLE is donationware. If the driver is useful, the author encourages purchasing a license or making a donation. Terms: https://vb-audio.com/Services/licensing.htm
+
+The standard signed VB-CABLE will be installed if it is not already present and configured for RoomWave: 7.1, 48 kHz, loopback. Settings of an existing VB-CABLE installation will also be changed to this profile. The original values are saved in ProgramData\RoomWave\Setup.
+
+Close RoomWave before continuing. Windows must be restarted after the first driver installation.
+
+If WebView2 is not installed, the installer will download it from Microsoft servers; an internet connection is required in that case.
+
+When RoomWave is uninstalled, the VB-CABLE virtual driver and WebView2 remain installed because they may be used by other applications. User settings and logs are also preserved.
