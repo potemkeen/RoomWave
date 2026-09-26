@@ -10,67 +10,13 @@ import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { Icon } from "./components/Icon";
 import { Panel } from "./components/Panel";
 import { SpeakerTest } from "./components/SpeakerTest";
+import { useRoomWaveState } from "./hooks/useRoomWaveState";
 
-import type {
-  AudioState,
-  DiagnosticLogState,
-  DiscoverySnapshot,
-  LocalConfig,
-  VirtualAudio,
-} from "./types/roomwave";
-
-const initialAudioState: AudioState = {
-  outputName: null,
-  peak: 0,
-  targetDelayMs: 80,
-
-  receivers: [],
-
-  layout: {
-    name: "…",
-    channelCount: 0,
-    channelMask: 0,
-    channels: [],
-    error: null,
-  },
-
-  assignments: {},
-  captureError: null,
-  testing: null,
-
-  localConfig: {
-    enabled: false,
-    sourceId: null,
-    outputId: null,
-    speakers: [],
-  },
-
-  windowsOutputs: [],
-
-  localOutput: {
-    status: "disabled",
-    error: null,
-    syncErrorMs: null,
-    latencyMs: null,
-    outputMs: null,
-    unavailable: [],
-  },
-};
+import type { LocalConfig } from "./types/roomwave";
 
 function App() {
-  const [virtualAudio, setVirtualAudio] = React.useState<VirtualAudio | null>(null);
-
-  const [logState, setLogState] = React.useState<DiagnosticLogState | null>(null);
-
-  const [snapshot, setSnapshot] = React.useState<DiscoverySnapshot>({
-    devices: [],
-    discovering: false,
-    error: null,
-  });
-
-  const [audio, setAudio] = React.useState<AudioState>(initialAudioState);
-
-  const [loaded, setLoaded] = React.useState(false);
+  const { virtualAudio, logState, setLogState, snapshot, audio, loaded, error, busy, action } =
+    useRoomWaveState();
 
   const [panel, setPanel] = React.useState<"settings" | "diagnostics" | null>(null);
 
@@ -78,82 +24,9 @@ function App() {
 
   const [draft, setDraft] = React.useState<LocalConfig | null>(null);
 
-  const [error, setError] = React.useState<string | null>(null);
-
   const [flashing, setFlashing] = React.useState<number | null>(null);
 
-  const [busy, setBusy] = React.useState<Set<string>>(new Set());
-
-  const pending = React.useRef(new Set<string>());
-
   const config = draft ?? audio.localConfig;
-
-  React.useEffect(() => {
-    let disposed = false;
-
-    let timer: ReturnType<typeof setTimeout>;
-
-    async function update() {
-      try {
-        const [devices, state, log, virtualState] = await Promise.all([
-          invoke<DiscoverySnapshot>("get_discovery_state"),
-
-          invoke<AudioState>("get_audio_state"),
-
-          invoke<DiagnosticLogState>("get_diagnostic_log_state"),
-
-          invoke<VirtualAudio>("get_virtual_audio_state"),
-        ]);
-
-        if (!disposed) {
-          setSnapshot(devices);
-          setAudio(state);
-          setLogState(log);
-          setVirtualAudio(virtualState);
-          setLoaded(true);
-        }
-      } catch (caughtError) {
-        if (!disposed) {
-          setError(String(caughtError));
-        }
-      } finally {
-        if (!disposed) {
-          timer = setTimeout(update, 500);
-        }
-      }
-    }
-
-    void update();
-
-    return () => {
-      disposed = true;
-      clearTimeout(timer);
-    };
-  }, []);
-
-  async function action(key: string, run: () => Promise<unknown>) {
-    if (pending.current.has(key)) {
-      return;
-    }
-
-    pending.current.add(key);
-
-    setBusy(new Set(pending.current));
-
-    try {
-      await run();
-
-      setAudio(await invoke<AudioState>("get_audio_state"));
-
-      setError(null);
-    } catch (caughtError) {
-      setError(String(caughtError));
-    } finally {
-      pending.current.delete(key);
-
-      setBusy(new Set(pending.current));
-    }
-  }
 
   const active = audio.receivers.filter((receiver) => receiver.status !== "disconnected");
 
