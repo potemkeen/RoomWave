@@ -1,5 +1,10 @@
 import React from "react";
-import { invoke } from "@tauri-apps/api/core";
+import {
+  getDiagnosticLogState,
+  revealDiagnosticLog,
+  startDiagnosticLog,
+  stopDiagnosticLog,
+} from "../services/tauri";
 
 import { MetricRows } from "./MetricRows";
 
@@ -75,9 +80,13 @@ export function DiagnosticsPanel({
           disabled={busy.has("logging")}
           onClick={() =>
             void action("logging", async () => {
-              await invoke(logState?.recording ? "stop_diagnostic_log" : "start_diagnostic_log");
+              if (logState?.recording) {
+                await stopDiagnosticLog();
+              } else {
+                await startDiagnosticLog();
+              }
 
-              setLogState(await invoke<DiagnosticLogState>("get_diagnostic_log_state"));
+              setLogState(await getDiagnosticLogState());
             })
           }
         >
@@ -88,7 +97,7 @@ export function DiagnosticsPanel({
           <>
             <button
               disabled={busy.has("logging")}
-              onClick={() => void action("logging", () => invoke("reveal_diagnostic_log"))}
+              onClick={() => void action("logging", revealDiagnosticLog)}
             >
               Показать файл
             </button>

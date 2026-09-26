@@ -1,5 +1,5 @@
 import React from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { testSpeaker } from "../services/tauri";
 
 import { Icon } from "./Icon";
 import { speakerPosition, speakerTitle } from "../lib/ui";
@@ -59,9 +59,7 @@ export function SpeakerTest({ audio, busy, flashing, setFlashing, action }: Spea
                   setFlashing(channel.mask);
 
                   try {
-                    await invoke("test_speaker", {
-                      speaker: channel.mask,
-                    });
+                    await testSpeaker(channel.mask);
                   } finally {
                     setFlashing(null);
                   }

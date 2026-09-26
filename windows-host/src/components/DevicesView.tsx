@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { connectDevice, disconnectAudio, refreshDiscovery, setChannel } from "../services/tauri";
 
 import { Icon } from "./Icon";
 import { speakerTitle } from "../lib/ui";
@@ -189,11 +189,7 @@ export function DevicesView({
               onClick={() =>
                 void action("all", async () => {
                   const results = await Promise.allSettled(
-                    available.map((device) =>
-                      invoke("connect_device", {
-                        deviceId: device.deviceId,
-                      }),
-                    ),
+                    available.map((device) => connectDevice(device.deviceId)),
                   );
 
                   const failed = results.filter((result) => result.status === "rejected");
@@ -211,7 +207,7 @@ export function DevicesView({
           <button
             className="text-button"
             disabled={busy.has("refresh")}
-            onClick={() => void action("refresh", () => invoke("refresh_discovery"))}
+            onClick={() => void action("refresh", refreshDiscovery)}
           >
             {busy.has("refresh") ? "Ищем…" : "Обновить"}
           </button>
@@ -286,12 +282,8 @@ export function DevicesView({
                     onClick={() =>
                       void action(device.deviceId, () =>
                         connected
-                          ? invoke("disconnect_audio", {
-                              deviceId: device.deviceId,
-                            })
-                          : invoke("connect_device", {
-                              deviceId: device.deviceId,
-                            }),
+                          ? disconnectAudio(device.deviceId)
+                          : connectDevice(device.deviceId),
                       )
                     }
                   >
@@ -308,10 +300,10 @@ export function DevicesView({
                       disabled={disabled}
                       onChange={(event) =>
                         void action(device.deviceId, () =>
-                          invoke("set_channel", {
-                            deviceId: device.deviceId,
-                            speaker: event.target.value === "" ? null : Number(event.target.value),
-                          }),
+                          setChannel(
+                            device.deviceId,
+                            event.target.value === "" ? null : Number(event.target.value),
+                          ),
                         )
                       }
                     >
@@ -354,13 +346,7 @@ export function DevicesView({
           <button
             className="text-button"
             disabled={busy.size > 0}
-            onClick={() =>
-              void action("all", () =>
-                invoke("disconnect_audio", {
-                  deviceId: null,
-                }),
-              )
-            }
+            onClick={() => void action("all", () => disconnectAudio(null))}
           >
             Отключить все телефоны
           </button>

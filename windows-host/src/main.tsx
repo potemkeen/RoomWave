@@ -1,6 +1,5 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { invoke } from "@tauri-apps/api/core";
 
 import "./style.css";
 
@@ -11,6 +10,7 @@ import { Icon } from "./components/Icon";
 import { Panel } from "./components/Panel";
 import { SpeakerTest } from "./components/SpeakerTest";
 import { useRoomWaveState } from "./hooks/useRoomWaveState";
+import { setLocalOutput } from "./services/tauri";
 
 import type { LocalConfig } from "./types/roomwave";
 
@@ -79,12 +79,7 @@ function App() {
     setDraft(null);
   }
 
-  const saveLocal = (next: LocalConfig) =>
-    void action("local", () =>
-      invoke("set_local_output", {
-        config: next,
-      }),
-    );
+  const saveLocal = (next: LocalConfig) => void action("local", () => setLocalOutput(next));
 
   return (
     <main>

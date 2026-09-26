@@ -1,5 +1,5 @@
 import React from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { setLocalOutput } from "../services/tauri";
 
 import { speakerTitle } from "../lib/ui";
 
@@ -212,7 +212,7 @@ export function AudioSettingsPanel({
           disabled={busy.has("local") || invalidConfig || !loaded}
           onClick={() =>
             void action("local", async () => {
-              await invoke("set_local_output", { config });
+              await setLocalOutput(config);
 
               setDraft(null);
             })

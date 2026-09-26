@@ -1,5 +1,11 @@
 import React from "react";
-import { invoke } from "@tauri-apps/api/core";
+
+import {
+  getAudioState,
+  getDiagnosticLogState,
+  getDiscoveryState,
+  getVirtualAudioState,
+} from "../services/tauri";
 
 import type {
   Action,
@@ -78,10 +84,10 @@ export function useRoomWaveState() {
     async function update() {
       try {
         const [devices, state, log, virtualState] = await Promise.all([
-          invoke<DiscoverySnapshot>("get_discovery_state"),
-          invoke<AudioState>("get_audio_state"),
-          invoke<DiagnosticLogState>("get_diagnostic_log_state"),
-          invoke<VirtualAudio>("get_virtual_audio_state"),
+          getDiscoveryState(),
+          getAudioState(),
+          getDiagnosticLogState(),
+          getVirtualAudioState(),
         ]);
 
         if (!disposed) {
@@ -121,7 +127,7 @@ export function useRoomWaveState() {
     try {
       await run();
 
-      setAudio(await invoke<AudioState>("get_audio_state"));
+      setAudio(await getAudioState());
       setError(null);
     } catch (caughtError) {
       setError(String(caughtError));
