@@ -1,4 +1,4 @@
-RoomWave Android receiver 0.1.2, compatible with Windows Host 0.1.1 and 0.1.2.
+RoomWave Android receiver 0.1.2, compatible with Windows Host 0.1.1 and 0.1.3.
 
 - Additional native-rate/PCM16 AAudio candidates when the existing output cannot provide low latency; PCM remains 48 kHz.
 - Higher UDP worker priority, less frequent diagnostic JSON construction, and output-lead updates even during missing audio.
@@ -11,7 +11,7 @@ Signed with the existing release key; installs over release 0.1.1 and the signed
 2. Open the file. If Android asks, allow app installation for the browser or file manager used to open the APK.
 3. Start RoomWave, connect the phone and PC to the same local network, and connect the phone in the PC application.
 
-[Windows Host installer](https://github.com/potemkeen/RoomWave/releases/tag/windows-v0.1.2).
+[Windows Host installer](https://github.com/potemkeen/RoomWave/releases/tag/windows-v0.1.3).
 
 **Switching from a debug build:** first uninstall the previous test version of RoomWave from the phone. It uses a different signature, so the release cannot be installed over it. Local settings will be reset during uninstall; you may need to assign the channel again on the PC. Future release APKs are signed with the same permanent key and install as updates.
 

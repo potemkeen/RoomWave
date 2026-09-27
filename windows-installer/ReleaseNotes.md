@@ -1,4 +1,4 @@
-RoomWave Windows Host 0.1.2. The Android APK is released separately.
+RoomWave Windows Host 0.1.3. The Android APK is released separately.
 
 - Settings and Diagnostics dialogs now block scrolling of the main window while retaining their own scrolling.
 - Settings close automatically after a successful save; failed saves keep the dialog open.

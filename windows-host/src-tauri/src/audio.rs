@@ -530,7 +530,8 @@ mod tests {
     #[test]
     fn new_peer_waits_for_clocks_and_budget_without_shifting_existing_outputs() {
         let hub = Hub::default();
-        hub.delay_ns.store(42_000_000, Ordering::Relaxed);
+        let below_minimum = PLAYOUT_NS - 1;
+        hub.delay_ns.store(below_minimum, Ordering::Relaxed);
         let (existing, _existing_rx) = mpsc::sync_channel(4);
         hub.subscribers
             .lock()
@@ -539,7 +540,7 @@ mod tests {
         let (new, new_rx) = mpsc::sync_channel(4);
         assert!(!hub.admit_peer("new", &new, false).unwrap());
         assert!(!hub.admit_peer("new", &new, true).unwrap());
-        assert_eq!(hub.delay(), 42_000_000);
+        assert_eq!(hub.delay(), below_minimum);
         assert_eq!(hub.subscribers.lock().unwrap().len(), 1);
         assert!(new_rx.try_recv().is_err());
         hub.delay_ns.store(PLAYOUT_NS, Ordering::Relaxed);
