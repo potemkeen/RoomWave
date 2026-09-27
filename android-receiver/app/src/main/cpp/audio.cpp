@@ -13,6 +13,10 @@
 
 namespace {
 constexpr int frames = 240, capacity = 256;
+constexpr int openPolicies = 12, candidateFields = 7;
+int16_t pcm16(float value) {
+    return static_cast<int16_t>(std::clamp(std::lround(value * 32768.f), -32768L, 32767L));
+}
 static_assert(std::atomic<double>::is_always_lock_free, "Audio metrics must not lock");
 static_assert(std::atomic<int64_t>::is_always_lock_free, "Audio timestamps must not lock");
 int64_t nowNs() {
@@ -36,7 +40,9 @@ struct Engine {
     AAudioStream* stream=nullptr;
     int firstOpenResult=0, gameUsageRequested=0, sharedRetry=0, usageFallback=0, actualUsage=-1;
     int openAttempts=0, selectedPolicy=-1;
-    std::array<double,20> openDiagnostics{};
+    std::array<double,openPolicies*candidateFields> openDiagnostics{};
+    int outputFormat=AAUDIO_FORMAT_PCM_FLOAT, requestedRate=48000;
+    std::atomic<int> bufferSetResult{0};
 #endif
     std::array<Slot,capacity> slots;
     Slot recovery;
@@ -52,6 +58,10 @@ struct Engine {
     std::atomic<int64_t> played{0}, fecPlayed{0}, retransmitPlayed{0}, duplicates{0}, collisions{0};
     std::atomic<int> error{0}, status{0};
     std::atomic<double> phase{0}, queueMs{0}, outputMs{0}, latencyMs{-1}, networkMs{0}, captureMs{0};
+    std::atomic<double> deadlineLeadMs{0};
+    std::atomic<int64_t> callbackCount{0}, callbackMaxGapNs{0}, callbackMaxWorkNs{0};
+    std::atomic<int> callbackMaxFrames{0};
+    int64_t lastCallbackNs=0;
     int64_t expected=-1, anchorFrame=0, anchorPlay=0;
     Packet current;
     bool have=false, loaded=false, measured=false;
@@ -117,19 +127,38 @@ struct Engine {
         return stampVersion.load(std::memory_order_acquire)==v && ns>0;
     }
 #ifndef ROOMWAVE_TEST
-    void render(float* out,int count) {
+    void render(void* out,int count) {
         const auto now=nowNs();
         const auto written=AAudioStream_getFramesWritten(stream);
-        renderAt(out,count,now,written);
+        callbackCount.fetch_add(1,std::memory_order_relaxed);
+        if(lastCallbackNs>0) callbackMaxGapNs.store(std::max(callbackMaxGapNs.load(),now-lastCallbackNs));
+        lastCallbackNs=now;
+        callbackMaxFrames.store(std::max(callbackMaxFrames.load(),count));
+        if(outputFormat==AAUDIO_FORMAT_PCM_FLOAT) renderAt(static_cast<float*>(out),count,now,written);
+        else renderInt16(static_cast<int16_t*>(out),count,now,written);
+        callbackMaxWorkNs.store(std::max(callbackMaxWorkNs.load(),nowNs()-now));
     }
 #endif
-    void renderAt(float* out,int count,int64_t now,int64_t written) {
+    // Fixed scratch storage, no allocation or extra queue. Keep the same frame
+    // clock and stereo routing for devices whose fast path accepts only PCM16.
+    void renderInt16(int16_t* out,int count,int64_t now,int64_t written) {
+        std::array<float,frames*2> scratch{};
+        for(int offset=0;offset<count;offset+=frames) {
+            const int n=std::min(frames,count-offset);
+            renderAt(scratch.data(),n,now,written+offset,offset==0);
+            for(int i=0;i<n*2;++i) out[offset*2+i]=pcm16(scratch[i]);
+        }
+    }
+    void renderAt(float* out,int count,int64_t now,int64_t written,bool updateLead=true) {
         std::fill_n(out,count*2,0.f);
         int64_t sf=0,sn=0;
         rendered.store(written+count);
         if(now-clockAt.load()>2000000000LL || now-stampAt.load()>500000000LL || !timestamp(sf,sn)) {
             status.store(0); gain=0; return;
         }
+        // Update even without usable network PCM. Otherwise a slow output can
+        // keep reporting a stale/zero lead while all incoming packets expire.
+        if(updateLead) deadlineLeadMs.store(std::clamp((sn+(written-sf)*1000000000LL/48000-now)/1e6,0.0,500.0));
         const auto localOffset=offset.load();
         if(!recovering) {
             int ready=2;
@@ -233,9 +262,9 @@ struct Engine {
         const int xruns=AAudioStream_getXRunCount(stream), burst=AAudioStream_getFramesPerBurst(stream);
         const int size=AAudioStream_getBufferSizeInFrames(stream);
         if(xruns>lastXruns) {
-            AAudioStream_setBufferSizeInFrames(stream,std::min(size+burst,burst*6)); stableAt=now;
+            bufferSetResult.store(AAudioStream_setBufferSizeInFrames(stream,std::min(size+burst,burst*6))); stableAt=now;
         } else if(now-stableAt>30000000000LL && size>burst*2) {
-            AAudioStream_setBufferSizeInFrames(stream,size-burst); stableAt=now;
+            bufferSetResult.store(AAudioStream_setBufferSizeInFrames(stream,size-burst)); stableAt=now;
         }
         lastXruns=xruns;
     }
@@ -243,7 +272,7 @@ struct Engine {
 };
 #ifndef ROOMWAVE_TEST
 aaudio_data_callback_result_t callback(AAudioStream*,void* user,void* data,int32_t n) {
-    static_cast<Engine*>(user)->render(static_cast<float*>(data),n); return AAUDIO_CALLBACK_RESULT_CONTINUE;
+    static_cast<Engine*>(user)->render(data,n); return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 void failed(AAudioStream*,void* user,aaudio_result_t error) { static_cast<Engine*>(user)->error.store(error); }
 Engine* engine(jlong handle) { return reinterpret_cast<Engine*>(handle); }
@@ -267,37 +296,46 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_roomwave_receiver_NativeAudio_open(J
     const auto setUsage=reinterpret_cast<SetUsage>(dlsym(RTLD_DEFAULT,"AAudioStreamBuilder_setUsage"));
     const auto getUsage=reinterpret_cast<GetUsage>(dlsym(RTLD_DEFAULT,"AAudioStream_getUsage"));
     // A successful open may silently grant NONE instead of LOW_LATENCY.
-    // Probe at most four policies, closing each rejected stream before the next
+    // Preserve the original four policies first, then try native-rate float and
+    // native-rate PCM16. Only accept 48 kHz: the network clock remains unchanged.
+    // Probe only during connection, closing each rejected stream before the next
     // to avoid consuming a fast-track slot ourselves. Never reopen mid-playback.
     e->gameUsageRequested=setUsage?1:0;
     e->openDiagnostics.fill(-1);
     int best=-1, bestBurst=INT32_MAX;
     aaudio_result_t result=AAUDIO_ERROR_UNAVAILABLE;
-    const int policies=setUsage?4:2;
+    const int policies=openPolicies;
     auto openPolicy=[&](int policy) {
-        if(setUsage) setUsage(builder,policy<2?AAUDIO_USAGE_GAME:AAUDIO_USAGE_MEDIA);
+        const int variant=policy/4, route=policy%4;
+        if(setUsage) setUsage(builder,route<2?AAUDIO_USAGE_GAME:AAUDIO_USAGE_MEDIA);
+        AAudioStreamBuilder_setSampleRate(builder,variant==0?48000:AAUDIO_UNSPECIFIED);
+        AAudioStreamBuilder_setFormat(builder,variant==2?AAUDIO_FORMAT_PCM_I16:AAUDIO_FORMAT_PCM_FLOAT);
         AAudioStreamBuilder_setSharingMode(builder,policy%2==0?AAUDIO_SHARING_MODE_EXCLUSIVE:AAUDIO_SHARING_MODE_SHARED);
         ++e->openAttempts;
         return AAudioStreamBuilder_openStream(builder,&e->stream);
     };
     auto valid=[&]() {
         return e->stream && AAudioStream_getSampleRate(e->stream)==48000 &&
-            AAudioStream_getChannelCount(e->stream)==2 && AAudioStream_getFormat(e->stream)==AAUDIO_FORMAT_PCM_FLOAT;
+            AAudioStream_getChannelCount(e->stream)==2 &&
+            (AAudioStream_getFormat(e->stream)==AAUDIO_FORMAT_PCM_FLOAT || AAudioStream_getFormat(e->stream)==AAUDIO_FORMAT_PCM_I16);
     };
     for(int policy=0;policy<policies;++policy) {
+        if(!setUsage && policy%4>=2) continue;
         result=openPolicy(policy);
         if(policy==0) e->firstOpenResult=result;
-        auto* d=e->openDiagnostics.data()+policy*5;
+        auto* d=e->openDiagnostics.data()+policy*candidateFields;
         d[0]=result;
-        if(result==AAUDIO_OK && valid()) {
+        if(result==AAUDIO_OK && e->stream) {
             d[1]=AAudioStream_getPerformanceMode(e->stream);
             d[2]=AAudioStream_getSharingMode(e->stream);
             d[3]=AAudioStream_getFramesPerBurst(e->stream);
             d[4]=AAudioStream_getBufferCapacityInFrames(e->stream);
-            if(d[1]==AAUDIO_PERFORMANCE_MODE_LOW_LATENCY) {
+            d[5]=AAudioStream_getSampleRate(e->stream);
+            d[6]=AAudioStream_getFormat(e->stream);
+            if(valid() && d[1]==AAUDIO_PERFORMANCE_MODE_LOW_LATENCY) {
                 e->selectedPolicy=policy; break;
             }
-            if(d[3]>0 && d[3]<bestBurst) {best=policy; bestBurst=int(d[3]);}
+            if(valid() && d[3]>0 && d[3]<bestBurst) {best=policy; bestBurst=int(d[3]);}
         }
         if(e->stream) {AAudioStream_close(e->stream); e->stream=nullptr;}
     }
@@ -307,14 +345,13 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_roomwave_receiver_NativeAudio_open(J
         if(result==AAUDIO_OK && valid()) e->selectedPolicy=best;
     }
     e->sharedRetry=e->openAttempts>1;
-    e->usageFallback=e->selectedPolicy>=2;
+    e->usageFallback=e->selectedPolicy>=0 && e->selectedPolicy%4>=2;
     AAudioStreamBuilder_delete(builder);
     if(result!=AAUDIO_OK || !valid()) { if(e->stream) AAudioStream_close(e->stream); delete e; return 0; }
-    if(AAudioStream_getSampleRate(e->stream)!=48000 || AAudioStream_getChannelCount(e->stream)!=2 || AAudioStream_getFormat(e->stream)!=AAUDIO_FORMAT_PCM_FLOAT) {
-        AAudioStream_close(e->stream); delete e; return 0;
-    }
+    e->outputFormat=AAudioStream_getFormat(e->stream);
+    e->requestedRate=e->selectedPolicy<4?48000:0;
     if(getUsage) e->actualUsage=getUsage(e->stream);
-    AAudioStream_setBufferSizeInFrames(e->stream,AAudioStream_getFramesPerBurst(e->stream)*2);
+    e->bufferSetResult.store(AAudioStream_setBufferSizeInFrames(e->stream,AAudioStream_getFramesPerBurst(e->stream)*2));
     e->stableAt=nowNs();
     if(AAudioStream_requestStart(e->stream)!=AAUDIO_OK) { AAudioStream_close(e->stream); delete e; return 0; }
     return reinterpret_cast<jlong>(e);
@@ -339,10 +376,16 @@ extern "C" JNIEXPORT jdoubleArray JNICALL Java_com_roomwave_receiver_NativeAudio
         double(e->firstOpenResult),double(e->gameUsageRequested),double(e->sharedRetry),double(e->usageFallback),double(e->actualUsage),
         double(AAudioStream_getSampleRate(e->stream)),double(AAudioStream_getDeviceId(e->stream)),double(AAudioStream_getBufferCapacityInFrames(e->stream)),
         double(e->sourceRate.load()),double(e->qualityPlayed.load()),double(e->latencyPlayed.load()),double(e->qualityLost.load()),double(e->latencyLost.load())};
-    auto result=env->NewDoubleArray(57); env->SetDoubleArrayRegion(result,0,35,values);
+    constexpr int tail=37+openPolicies*candidateFields;
+    auto result=env->NewDoubleArray(tail+9); env->SetDoubleArrayRegion(result,0,35,values);
     const double selection[]={double(e->openAttempts),double(e->selectedPolicy)};
     env->SetDoubleArrayRegion(result,35,2,selection);
-    env->SetDoubleArrayRegion(result,37,20,e->openDiagnostics.data()); return result;
+    env->SetDoubleArrayRegion(result,37,openPolicies*candidateFields,e->openDiagnostics.data());
+    const double extra[]={double(e->outputFormat),double(e->requestedRate),double(e->callbackMaxFrames.load()),
+        e->callbackMaxGapNs.load()/1e6,e->deadlineLeadMs.load(),
+        e->stampAt.load()>0?(nowNs()-e->stampAt.load())/1e6:-1.0,double(e->bufferSetResult.load()),
+        double(e->callbackCount.load()),e->callbackMaxWorkNs.load()/1e6};
+    env->SetDoubleArrayRegion(result,tail,9,extra); return result;
 }
 extern "C" JNIEXPORT void JNICALL Java_com_roomwave_receiver_NativeAudio_close(JNIEnv*,jobject,jlong h) {
     auto* e=engine(h); AAudioStream_requestStop(e->stream); AAudioStream_close(e->stream); delete e;
@@ -442,6 +485,36 @@ int main() {
     }
     assert(modes.loss.load()==0);assert(modes.qualityPlayed.load()==2);assert(modes.latencyPlayed.load()==1);
     assert(std::abs(modes.expected+modes.cursor-720)<1.0);
+    // Non-float fallback has identical routing/timing even when an OEM callback
+    // (770 frames) is not aligned to our 240-frame network blocks.
+    auto floatOwner=std::make_unique<Engine>();
+    auto intOwner=std::make_unique<Engine>();
+    for(auto* candidate : {floatOwner.get(),intOwner.get()}) {
+        candidate->clockAt.store(now); candidate->stampAt.store(now);
+        candidate->stampNs.store(now+20000000);
+        for(int n=0;n<5;++n) {
+            Packet packet; packet.frame=n*frames; packet.play=now+20000000+n*5000000;
+            packet.received=now; packet.capture=now; packet.send=now;
+            for(int i=0;i<frames;++i) {packet.pcm[i*2]=16384;packet.pcm[i*2+1]=-8192;}
+            assert(candidate->push(packet));
+        }
+    }
+    std::array<float,1540> floatOut{};
+    std::array<int16_t,1540> intOut{};
+    floatOwner->renderAt(floatOut.data(),770,now,0);
+    intOwner->renderInt16(intOut.data(),770,now,0);
+    for(size_t i=0;i<intOut.size();++i) assert(intOut[i]==pcm16(floatOut[i]));
+    assert(floatOwner->expected==intOwner->expected);
+    assert(floatOwner->loss.load()==0 && intOwner->loss.load()==0);
+    assert(floatOwner->deadlineLeadMs.load()==intOwner->deadlineLeadMs.load());
+    assert(pcm16(1.f)==32767 && pcm16(-1.f)==-32768 && pcm16(2.f)==32767);
+    // Hardware lead must be measurable before any PCM arrives (and in silence).
+    auto emptyOwner=std::make_unique<Engine>();
+    emptyOwner->clockAt.store(now); emptyOwner->stampAt.store(now);
+    emptyOwner->stampNs.store(now+87000000);
+    emptyOwner->renderAt(out.data(),240,now,0);
+    assert(emptyOwner->deadlineLeadMs.load()==87.0);
+    assert(emptyOwner->played.load()==0 && emptyOwner->loss.load()==0);
     std::puts("PASS: pause timeline recovery, resumed PCM, expired packets, single-packet reorder, pre-deadline FEC arrival, duplicate and loss accounting");
 }
 #endif

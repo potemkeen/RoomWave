@@ -1,6 +1,12 @@
-RoomWave Windows Host 0.1.1. The Android APK is released separately.
+RoomWave Windows Host 0.1.2. The Android APK is released separately.
 
-Detailed logging is now disabled by default. In “Diagnostics”, you can record a session for 10 minutes, stop it manually and open the file. Only a small error journal is stored continuously.
+- Settings and Diagnostics dialogs now block scrolling of the main window while retaining their own scrolling.
+- Settings close automatically after a successful save; failed saves keep the dialog open.
+- Minimum playout budget reduced to 30 ms. Adaptive device/group budgets can still raise actual latency; this is not a promise of 30 ms playback.
+- Added WASAPI shared-period diagnostic probes. Production capture is unchanged.
+- Internal host/UI refactoring and updated documentation.
+
+Detailed session logging remains opt-in in Diagnostics.
 
 ### Installation
 

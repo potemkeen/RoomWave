@@ -215,6 +215,7 @@ export function AudioSettingsPanel({
               await setLocalOutput(config);
 
               setDraft(null);
+              onCancel();
             })
           }
         >
@@ -222,11 +223,7 @@ export function AudioSettingsPanel({
         </button>
       </div>
 
-      <small className="help">
-        {draft === null
-          ? "Настройки сохранены. Можно закрыть это окно."
-          : "Изменения применятся после сохранения."}
-      </small>
+      <small className="help">Изменения применятся после сохранения.</small>
     </>
   );
 }

@@ -31,6 +31,9 @@ class PcmPlayer(private val sessionId: Long, private val host: InetAddress, priv
     private val decodeTiming = WorkerTiming()
     private val pushTiming = WorkerTiming()
     private val receiveTiming = WorkerTiming()
+    private val receiveIntervals = WorkerTiming()
+    private val receiveTimeoutOverrun = WorkerTiming()
+    @Volatile private var udpThreadPriority = 0
     @Volatile private var jitter = 0.0
     @Volatile private var extended = false
     @Volatile private var captureNs = 0L
@@ -72,10 +75,16 @@ class PcmPlayer(private val sessionId: Long, private val host: InetAddress, priv
         monitor = Thread({ guarded { measure() } }, "RoomWave-AAudio-Metrics").also { it.start() }
     }
     private fun receive() {
+        // Raise only the bounded packet worker, never the JSON/UI monitor. This
+        // is a scheduling hint, not a realtime guarantee or a Wi-Fi power lock.
+        try { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO) }
+        catch (_: SecurityException) { /* OEM policy may deny the request. */ }
+        udpThreadPriority = android.os.Process.getThreadPriority(android.os.Process.myTid())
         val bytes = ByteArray(1500)
         // NativeAudio.push copies synchronously; FEC retains wire bytes, never this PCM.
         val pcmScratch = ByteArray(960)
         val datagram = DatagramPacket(bytes,bytes.size)
+        var previousReceive = 0L
         var previousTransit: Double? = null
         val tracker = RepairTracker()
         val missing = tracker.missing
@@ -121,10 +130,13 @@ class PcmPlayer(private val sessionId: Long, private val host: InetAddress, priv
         }
         while (running.get()) {
             var receiveStart = 0L
+            val waitStart = System.nanoTime()
             try {
                 datagram.length=bytes.size; socket.receive(datagram)
                 val received=System.nanoTime()
                 if(datagram.address!=host) continue
+                if(previousReceive>0) receiveIntervals.record(received-previousReceive)
+                previousReceive=received
                 receiveStart = received
                 val parity=datagram.length>=4 && bytes[0]==82.toByte() && bytes[1]==87.toByte() && bytes[2]==70.toByte() && bytes[3]==88.toByte()
                 val repaired=if(parity) fec.parity(bytes,datagram.length) else {
@@ -140,6 +152,7 @@ class PcmPlayer(private val sessionId: Long, private val host: InetAddress, priv
                 if(repaired!=null) acceptWire(repaired,repaired.size,received,true)
                 fecRecovered.set(fec.recovered); fecInvalid.set(fec.invalid)
             } catch (_: SocketTimeoutException) {
+                receiveTimeoutOverrun.record((System.nanoTime()-waitStart-2_000_000L).coerceAtLeast(0))
                 // A render endpoint can disappear temporarily. TCP heartbeats own session
                 // liveness; the native renderer fades silence and rejoins host deadlines.
             }
@@ -172,27 +185,34 @@ class PcmPlayer(private val sessionId: Long, private val host: InetAddress, priv
         }
     }
     private fun measure() {
+        var lastReport = 0L
         while(running.get()) {
             val s = NativeAudio.poll(handle)
             check(s[16] == 0.0) { "AAudio output disconnected: ${s[16].toInt()}" }
             packets.set(s[0].toLong()); lost.set(s[1].toLong()); playedFrames.set(s[3].toLong())
             val now = System.nanoTime()
-            outputLead = s[6].coerceIn(10.0,500.0)
+            outputLead = maxOf(s[6],s[125]).coerceIn(10.0,500.0)
             val state = when(s[15].toInt()) { 0 -> "audioClock"; 1 -> "buffering"; 2 -> "aligning"; else -> "synced" }
             synchronization.set(SyncReport(state,s[4].takeIf { s[15] >= 2 }))
             if(s[7] in 0.0..5000.0 && s[15] >= 2 && captureNs > 0) {
                 val capture = captureNs
                 latency.record(capture,capture+offsetNs+(s[7]*1e6).toLong(),if(extended) "capture-read" else "timestamp",now)
             }
+            // Poll the native clock at 20 Hz, but assemble diagnostic JSON at
+            // 4 Hz. Host telemetry does not need 20 allocations of each tree/sec.
+            if(now-lastReport<250_000_000L) { Thread.sleep(50); continue }
+            lastReport=now
             fun timing(value: WorkerTiming): JSONObject {
                 val summary = value.snapshot()
                 return JSONObject().put("samples",summary.count).put("p50Ms",summary.p50)
                     .put("p95Ms",summary.p95).put("p99Ms",summary.p99).put("maxMs",summary.max).put("firstMs",value.firstMs())
             }
             report.set(JSONObject().put("receiverPolicy","burst-repair-v3")
+                .put("udpThreadPriority",udpThreadPriority)
+                .put("receiveIntervals",timing(receiveIntervals)).put("receiveTimeoutOverrun",timing(receiveTimeoutOverrun))
                 .put("decodeProcessing",timing(decodeTiming)).put("nativePushProcessing",timing(pushTiming))
                 .put("receiveProcessing",timing(receiveTiming)).put("captureToSendMs",s[9]).put("networkMs",s[8])
-                .put("jitterBufferMs",s[5]).put("audioOutputMs",s[6]).put("jitterMs",jitter)
+                .put("jitterBufferMs",s[5]).put("audioOutputMs",maxOf(s[6],s[125])).put("jitterMs",jitter)
                 .put("latePackets",s[2].toLong()).put("packetLoss",s[1].toLong()).put("underruns",s[10].toLong())
                 .put("repairRateLimited",repairRateLimited.get()).put("repairStallGraceMs",repairStallGraceNs.get()/1e6)
                 .put("repairGapsDetected",gapsDetected.get()).put("repairGapsPredicted",gapsPredicted.get())
@@ -213,16 +233,24 @@ class PcmPlayer(private val sessionId: Long, private val host: InetAddress, priv
                 .put("qualityPacketsReceived",qualityReceived.get()).put("latencyPacketsReceived",latencyReceived.get()).put("audioWireBytesReceived",wireBytes.get())
                 .put("playbackSampleRate",s[30].toInt()).put("qualityPlayed",s[31].toLong()).put("latencyPlayed",s[32].toLong())
                 .put("qualityLost",s[33].toLong()).put("latencyLost",s[34].toLong())
-                .put("audioPolicy","verified-low-latency-v2")
+                .put("audioPolicy","native-format-probe-v3")
+                .put("outputFormat",if(s[121].toInt()==1) "pcm16" else "float")
+                .put("requestedOutputRate",s[122].toInt())
+                .put("callbackMaxFrames",s[123].toInt()).put("callbackMaxGapMs",s[124])
+                .put("outputDeadlineLeadMs",s[125]).put("audioTimestampAgeMs",s[126])
+                .put("bufferSetResult",s[127].toInt()).put("callbackCount",s[128].toLong())
+                .put("callbackMaxWorkMs",s[129])
                 .put("openAttempts",s[35].toInt()).put("selectedOpenPolicy",s[36].toInt())
                 .put("lowLatencyGranted",s[13].toInt()==12)
                 .put("openCandidates",JSONArray().also { a ->
-                    for(i in 0..3) { val j=37+i*5
-                        if(s[j]!=-1.0) a.put(JSONObject().put("usage",if(i<2) "game" else "media")
+                    for(i in 0 until 12) { val j=37+i*7
+                        if(s[j]!=-1.0) a.put(JSONObject().put("usage",if(i%4<2) "game" else "media")
+                            .put("requestedRate",if(i<4) 48000 else 0).put("requestedFormat",if(i>=8) "pcm16" else "float")
                             .put("requestedSharing",if(i%2==0) "exclusive" else "shared")
                             .put("result",s[j].toInt()).put("performanceMode",s[j+1].toInt())
                             .put("sharingMode",s[j+2].toInt()).put("framesPerBurst",s[j+3].toInt())
-                            .put("capacityFrames",s[j+4].toInt()))
+                            .put("capacityFrames",s[j+4].toInt()).put("sampleRate",s[j+5].toInt())
+                            .put("format",s[j+6].toInt()))
                     }
                 }).put("exclusiveOpenResult",s[22].toInt())
                 .put("gameUsageRequested",s[23]!=0.0).put("sharedOpenRetried",s[24]!=0.0)

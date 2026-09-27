@@ -82,6 +82,9 @@ class DeviceDiagnostics(context: Context, private val wakeHeld: () -> Boolean, p
             .put("ignoringBatteryOptimizations",power.isIgnoringBatteryOptimizations(app.packageName))
             .put("partialWakeLockHeld",wakeHeld()).put("wifiLockHeld",wifiHeld())
             .put("wifiLockRequested","HIGH_PERF").put("eventRevision",revision)
+            .put("wifiLockScreenRestricted",Build.VERSION.SDK_INT>=34)
+            .put("wifiLockEffectiveMode",if(Build.VERSION.SDK_INT>=34) "LOW_LATENCY" else "HIGH_PERF")
+            .put("keepScreenDuringPlayback",app.getSharedPreferences("playback",Context.MODE_PRIVATE).getBoolean("keepScreenDuringPlayback",false))
         try {
             val battery = app.registerReceiver(null,IntentFilter(Intent.ACTION_BATTERY_CHANGED))
             value.put("plugged",battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED,-1) ?: JSONObject.NULL)
@@ -89,6 +92,8 @@ class DeviceDiagnostics(context: Context, private val wakeHeld: () -> Boolean, p
             val process = ActivityManager.RunningAppProcessInfo()
             ActivityManager.getMyMemoryState(process)
             value.put("processImportance",process.importance)
+            // Necessary conditions, not proof that the vendor driver applied a lock.
+            value.put("wifiLowLatencyEligible",power.isInteractive && process.importance==ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND)
             if(Build.VERSION.SDK_INT >= 28) value.put("backgroundRestricted",app.getSystemService(ActivityManager::class.java).isBackgroundRestricted)
             val active = network.activeNetwork
             val capabilities = active?.let { network.getNetworkCapabilities(it) }

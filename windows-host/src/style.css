@@ -9,6 +9,13 @@
 * {
   box-sizing: border-box;
 }
+html {
+  scrollbar-gutter: stable;
+}
+html:has(dialog[open]),
+body:has(dialog[open]) {
+  overflow: hidden;
+}
 body {
   margin: 0;
 }
@@ -522,6 +529,8 @@ footer button {
   margin-top: 18px;
 }
 dialog {
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 0;
   width: min(620px, calc(100vw - 32px));
   max-height: calc(100vh - 48px);

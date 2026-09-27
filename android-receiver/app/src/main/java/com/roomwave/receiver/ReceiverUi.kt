@@ -21,6 +21,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 
 private val Green = Color(0xFF28614F)
 private val Ink = Color(0xFF203532)
@@ -38,11 +40,24 @@ private fun RoomWaveTheme(content: @Composable () -> Unit) {
 @Composable
 fun RoomWaveApp(onStart: () -> Unit) {
     var diagnostics by rememberSaveable { mutableStateOf(false) }
+    val context = LocalContext.current
+    val view = LocalView.current
+    val preferences = remember { context.getSharedPreferences("playback", android.content.Context.MODE_PRIVATE) }
+    var keepScreen by remember { mutableStateOf(preferences.getBoolean("keepScreenDuringPlayback", false)) }
+    val keepAwake = keepScreen && AudioReceiverService.current?.connected == true
+    DisposableEffect(view, keepAwake) {
+        val previous = view.keepScreenOn
+        view.keepScreenOn = keepAwake
+        onDispose { view.keepScreenOn = previous }
+    }
     RoomWaveTheme {
         Surface(Modifier.fillMaxSize(), color = Page) {
             if (diagnostics) {
                 BackHandler { diagnostics = false }
-                DiagnosticsScreen(onBack = { diagnostics = false })
+                DiagnosticsScreen(onBack = { diagnostics = false }, keepScreen = keepScreen, onKeepScreen = {
+                    keepScreen = it
+                    preferences.edit().putBoolean("keepScreenDuringPlayback", it).apply()
+                })
             } else {
                 val service = AudioReceiverService.current
                 val advertiser = service?.advertiser
@@ -140,7 +155,7 @@ private fun ReceiverScreen(
 }
 
 @Composable
-private fun DiagnosticsScreen(onBack: () -> Unit) {
+private fun DiagnosticsScreen(onBack: () -> Unit, keepScreen: Boolean, onKeepScreen: (Boolean) -> Unit) {
     val service = AudioReceiverService.current
     val advertiser = service?.advertiser
     val latency = service?.latencyReport
@@ -154,6 +169,11 @@ private fun DiagnosticsScreen(onBack: () -> Unit) {
         }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("Показатели обновляются автоматически. Здесь можно проверить соединение и работу аудиовыхода.", color = Muted, style = MaterialTheme.typography.bodySmall)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Не гасить экран при подключении", Modifier.weight(1f))
+                Switch(checked = keepScreen, onCheckedChange = onKeepScreen)
+            }
+            Text("Если при выключении экрана звук прерывается, оставьте RoomWave открытым. Эта настройка увеличивает расход батареи и не отменяет блокировку кнопкой питания.", color = Muted, style = MaterialTheme.typography.bodySmall)
             DiagnosticGroup("Подключение", listOf(
                 "Телефон" to (advertiser?.deviceName ?: "—"), "Состояние" to (service?.connection ?: "Остановлен"),
                 "IP-адрес" to (advertiser?.localIp ?: "—"), "Обнаружение в сети" to (advertiser?.status ?: "—"),

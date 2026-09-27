@@ -2,7 +2,7 @@
 
 RoomWave streams system audio from a Windows computer to Android phones over the local network. You can connect multiple phones, assign each one a separate audio channel, and keep some channels on the PC speakers or headphones.
 
-**[Download for Windows](https://github.com/potemkeen/RoomWave/releases/latest)** · **[Download for Android](https://github.com/potemkeen/RoomWave/releases/tag/android-v0.1.1)** · [Build from source](docs/development.md)
+**[Download for Windows](https://github.com/potemkeen/RoomWave/releases/latest)** · **[Download for Android](https://github.com/potemkeen/RoomWave/releases/tag/android-v0.1.2)** · [Build from source](docs/development.md)
 
 ## Features
 
@@ -20,7 +20,7 @@ For example: the front channels and center play through the PC speakers, while t
 
 The installer automatically installs and configures the VB-CABLE virtual audio device. Voicemeeter is not required. If WebView2 is needed, it will be downloaded automatically. Restart Windows if the installer asks you to.
 
-**Android:** download the APK from the [Android release](https://github.com/potemkeen/RoomWave/releases/tag/android-v0.1.1) to a phone running Android 8.0 or later. Open the file and, if prompted, allow app installation for the browser or file manager. When switching from an older debug build, uninstall it once before installing the release because the signatures are different. Subsequent release APKs install as updates.
+**Android:** download the APK from the [Android release](https://github.com/potemkeen/RoomWave/releases/tag/android-v0.1.2) to a phone running Android 8.0 or later. Open the file and, if prompted, allow app installation for the browser or file manager. When switching from an older debug build, uninstall it once before installing the release because the signatures are different. Subsequent release APKs install as updates.
 
 > The RoomWave installer is not yet publisher-signed, so Windows may display a SmartScreen warning. The package includes the signed VB-CABLE driver; Windows test-signing mode is not required for it.
 
