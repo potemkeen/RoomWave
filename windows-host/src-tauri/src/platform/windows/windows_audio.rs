@@ -4,7 +4,10 @@ use windows::{
     core::{w, Interface, HSTRING},
     Win32::{
         Foundation::HANDLE,
-        Media::Audio::{IAudioClient, IAudioClient3, IMMDeviceEnumerator, MMDeviceEnumerator},
+        Media::Audio::{
+            IAudioClient, IAudioClient3, IMMDeviceEnumerator, MMDeviceEnumerator,
+            AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+        },
         System::{
             Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL},
             Threading::{AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW},
@@ -61,6 +64,75 @@ pub fn engine(id: &str) -> Value {
         }
     }
     query(id).unwrap_or_else(|e| json!({"error":e.to_string()}))
+}
+
+pub fn shared_period_probe(id: &str, format: &wasapi::WaveFormat, period_frames: u32) -> Value {
+    fn query(
+        id: &str,
+        format: &wasapi::WaveFormat,
+        period_frames: u32,
+    ) -> windows::core::Result<Value> {
+        unsafe {
+            let enumerator: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+
+            let device = enumerator.GetDevice(&HSTRING::from(id))?;
+
+            let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+            let client3: IAudioClient3 = client.cast()?;
+
+            let (
+                mut default_period,
+                mut fundamental_period,
+                mut minimum_period,
+                mut maximum_period,
+            ) = (0, 0, 0, 0);
+
+            client3.GetSharedModeEnginePeriod(
+                format.as_waveformatex_ref(),
+                &mut default_period,
+                &mut fundamental_period,
+                &mut minimum_period,
+                &mut maximum_period,
+            )?;
+
+            let initialize_result = client3.InitializeSharedAudioStream(
+                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                period_frames,
+                format.as_waveformatex_ref(),
+                None,
+            );
+
+            let mut value = json!({
+                "requestedPeriodFrames": period_frames,
+                "requestedPeriodMs": period_frames as f64 * 1000.0 / format.get_samplespersec() as f64,
+                "defaultPeriodFrames": default_period,
+                "fundamentalPeriodFrames": fundamental_period,
+                "minimumPeriodFrames": minimum_period,
+                "maximumPeriodFrames": maximum_period,
+            });
+
+            match initialize_result {
+                Ok(()) => {
+                    let initialized: IAudioClient = client3.cast()?;
+                    let buffer_frames = initialized.GetBufferSize()?;
+
+                    value["initialized"] = json!(true);
+                    value["bufferFrames"] = json!(buffer_frames);
+                    value["bufferMs"] =
+                        json!(buffer_frames as f64 * 1000.0 / format.get_samplespersec() as f64);
+                }
+                Err(error) => {
+                    value["initialized"] = json!(false);
+                    value["initializeError"] = json!(error.to_string());
+                }
+            }
+
+            Ok(value)
+        }
+    }
+
+    query(id, format, period_frames).unwrap_or_else(|e| json!({"error": e.to_string()}))
 }
 
 /// Created and dropped on the worker that owns the WASAPI stream.

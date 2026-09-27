@@ -113,15 +113,23 @@ fn capture_endpoint(stop: &AtomicBool, hub: &Hub, timeline: &mut (u64, i64)) -> 
     let channels = layout.channel_count;
     let align = channels * 2;
     let block_bytes = FRAMES * align;
+    let wave_format = WaveFormat::new(
+        16,
+        16,
+        &SampleType::Int,
+        48000,
+        channels,
+        Some(layout.channel_mask),
+    );
+
+    let period_probe_240 =
+        crate::windows_audio::shared_period_probe(&capture_id, &wave_format, 240);
+
+    let period_probe_128 =
+        crate::windows_audio::shared_period_probe(&capture_id, &wave_format, 128);
+
     audio.initialize_client(
-        &WaveFormat::new(
-            16,
-            16,
-            &SampleType::Int,
-            48000,
-            channels,
-            Some(layout.channel_mask),
-        ),
+        &wave_format,
         &Direction::Capture,
         &StreamMode::EventsShared {
             autoconvert: true,
@@ -313,7 +321,10 @@ fn capture_endpoint(stop: &AtomicBool, hub: &Hub, timeline: &mut (u64, i64)) -> 
             pack_work.add_ns(packing_started.elapsed().as_nanos() as u64);
             if reported.elapsed() >= Duration::from_millis(500) {
                 *hub.capture_stages.lock().map_err(|e| e.to_string())? = json!({
-                    "engine":engine,"wasapiBufferFrames":buffer_frames,
+                    "engine": engine,
+                    "sharedPeriodProbe240": period_probe_240,
+                    "sharedPeriodProbe128": period_probe_128,
+                    "wasapiBufferFrames": buffer_frames,
                     "wasapiBufferMs":buffer_frames as f64 / 48.,"requestedBufferMs":20,
                     "streamSampleRate":48000,"pcmBlockFrames":FRAMES,"pcmBlockBytes":block_bytes,
                     "queueFrames":pcm.len()/align,"maxQueueFrames":max_queue_frames,
