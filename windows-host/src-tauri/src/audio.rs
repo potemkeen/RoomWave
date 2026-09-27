@@ -27,7 +27,7 @@ pub use local_output::Config as LocalOutputConfig;
 const FRAMES: usize = 240;
 const PCM_BYTES: usize = FRAMES * 4;
 const PERIOD_NS: i64 = 5_000_000;
-const PLAYOUT_NS: i64 = 80_000_000;
+const PLAYOUT_NS: i64 = 30_000_000;
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Clone, Default, Serialize)]
