@@ -30,6 +30,7 @@ When submitting a pull request:
 - avoid unrelated refactoring;
 - preserve compatibility with the existing protocol unless the protocol change is intentional;
 - document significant architectural or protocol changes;
+- record notable user-facing changes under `Unreleased` in [CHANGELOG.md](CHANGELOG.md), identifying Windows or Android;
 - add or update tests where appropriate;
 - verify that existing tests still pass;
 - avoid adding unnecessary buffering or blocking operations to realtime audio paths.

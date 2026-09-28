@@ -43,6 +43,7 @@ Latency depends on the network and audio devices. RoomWave is designed for trust
 
 ## Documentation
 
+- [Changelog](CHANGELOG.md)
 - [Architecture](docs/architecture.md)
 - [Build and development](docs/development.md)
 - [Installer and VB-CABLE configuration](windows-installer/README.md)

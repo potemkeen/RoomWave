@@ -6,6 +6,9 @@ Workflow: `.github/workflows/windows-release.yml`. Windows x64 only; Android is 
 
 1. Update versions consistently in `windows-host/package.json`, `package-lock.json` (including the root package), `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `Cargo.lock`. Update `windows-installer/ReleaseNotes.md`.
 2. Review the changes, commit them and push to GitHub.
+
+   Move the relevant Windows items from `Unreleased` in [CHANGELOG.md](../CHANGELOG.md) into a versioned entry. Keep Android items separate. Confirm the UTC publication date after release; failed builds are not published releases.
+
 3. Create and push a new immutable tag, for example `git tag windows-v0.1.0`, then `git push origin windows-v0.1.0`.
 4. Wait for the **Windows installer** workflow. On success, the EXE and SHA256 will appear in Releases. No APK is included.
 

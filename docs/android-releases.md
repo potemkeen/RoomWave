@@ -6,6 +6,9 @@ Workflow `.github/workflows/android-release.yml` builds a regular signed release
 
 1. Increment `versionCode` and update `versionName` in `android-receiver/app/build.gradle.kts`. `versionCode` must increase with every APK update.
 2. Update `android-receiver/ReleaseNotes.md`, commit and push the changes.
+
+   Move the relevant Android items from `Unreleased` in [CHANGELOG.md](../CHANGELOG.md) into a versioned entry. Keep Windows items separate. Confirm the UTC publication date after release; failed builds are not published releases.
+
 3. Create the `android-v<versionName>` tag and push it to GitHub, for example `git tag android-v0.1.0` and `git push origin android-v0.1.0`.
 4. Wait for the **Android APK** workflow: tests, lint, all-ABI build, signing, certificate and SHA256 verification, and APK/checksum publication.
 
