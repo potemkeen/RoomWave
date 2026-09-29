@@ -8,9 +8,9 @@ dates in UTC. Entries cover published releases, not every development commit.
 
 No unreleased application changes recorded yet.
 
-## Windows 0.1.4 — 2026-09-29
+## Windows 0.1.5 — 2026-09-29
 
-[Download release](https://github.com/potemkeen/RoomWave/releases/tag/windows-v0.1.4)
+[Download release](https://github.com/potemkeen/RoomWave/releases/tag/windows-v0.1.5)
 
 - Consolidated receiver health into one stable-height summary per phone, with explanations and raw metrics in a collapsed section directly underneath.
 
@@ -20,6 +20,8 @@ No unreleased application changes recorded yet.
 - Report the selected capture initialization path, requested/current engine period, actual WASAPI buffer and fallback reason in diagnostics. Removed the two startup-only period probes.
 - The tested VB-CABLE loopback endpoint rejects the low-period stream flags; fallback retains the existing 10 ms capture period. No capture-latency reduction is claimed for that endpoint.
 - Added frontend health-classification tests and formatting checks to Windows release CI.
+
+Windows 0.1.4 was not published: release CI exposed a CRLF/LF checkout mismatch in the new formatting check. Version 0.1.5 fixes checkout line endings and includes the same application changes.
 
 ## Windows 0.1.3 — 2026-09-27
 

@@ -1,0 +1,2 @@
+# Match Prettier's LF output on Windows release runners and developer checkouts.
+windows-host/src/** text eol=lf
