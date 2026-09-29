@@ -2652,7 +2652,7 @@ dependencies = [
 
 [[package]]
 name = "roomwave-host"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "env_logger",
  "log",

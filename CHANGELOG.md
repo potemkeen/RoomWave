@@ -8,6 +8,19 @@ dates in UTC. Entries cover published releases, not every development commit.
 
 No unreleased application changes recorded yet.
 
+## Windows 0.1.4 — 2026-09-29
+
+[Download release](https://github.com/potemkeen/RoomWave/releases/tag/windows-v0.1.4)
+
+- Consolidated receiver health into one stable-height summary per phone, with explanations and raw metrics in a collapsed section directly underneath.
+
+- Added a receiver health summary above detailed diagnostics, using recent observations to explain recurring delivery, output and synchronization problems. Group-delay attribution is explicitly an estimate; raw metrics remain available.
+
+- Attempt event-driven `IAudioClient3` capture at 240 frames / 5 ms, retaining the existing shared-event capture if initialization is unsupported or fails. Render endpoints require loopback support; the earlier render-only probes did not establish capture compatibility.
+- Report the selected capture initialization path, requested/current engine period, actual WASAPI buffer and fallback reason in diagnostics. Removed the two startup-only period probes.
+- The tested VB-CABLE loopback endpoint rejects the low-period stream flags; fallback retains the existing 10 ms capture period. No capture-latency reduction is claimed for that endpoint.
+- Added frontend health-classification tests and formatting checks to Windows release CI.
+
 ## Windows 0.1.3 — 2026-09-27
 
 [Download release](https://github.com/potemkeen/RoomWave/releases/tag/windows-v0.1.3)

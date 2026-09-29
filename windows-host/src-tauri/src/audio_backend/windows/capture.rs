@@ -13,7 +13,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
+use wasapi::{DeviceEnumerator, Direction, SampleType, WaveFormat};
+
+#[path = "capture_stream.rs"]
+mod capture_stream;
 
 use super::local_output;
 
@@ -99,7 +102,6 @@ fn capture_endpoint(stop: &AtomicBool, hub: &Hub, timeline: &mut (u64, i64)) -> 
     }
     let capture_id = crate::default_output::capture_endpoint(&id, &layout)?;
     let capture_device = DeviceEnumerator::new()?.get_device(&capture_id)?;
-    let mut audio = capture_device.get_iaudioclient()?;
     let signature = (id, layout.clone(), rate);
     {
         let mut s = hub.state.lock().map_err(|e| e.to_string())?;
@@ -122,24 +124,9 @@ fn capture_endpoint(stop: &AtomicBool, hub: &Hub, timeline: &mut (u64, i64)) -> 
         Some(layout.channel_mask),
     );
 
-    let period_probe_240 =
-        crate::windows_audio::shared_period_probe(&capture_id, &wave_format, 240);
-
-    let period_probe_128 =
-        crate::windows_audio::shared_period_probe(&capture_id, &wave_format, 128);
-
-    audio.initialize_client(
-        &wave_format,
-        &Direction::Capture,
-        &StreamMode::EventsShared {
-            autoconvert: true,
-            buffer_duration_hns: 200_000,
-        },
-    )?;
-    let event = audio.set_get_eventhandle()?;
-    let capture = audio.get_audiocaptureclient()?;
-    let engine = crate::windows_audio::engine(&capture_id);
-    let buffer_frames = audio.get_buffer_size()?;
+    let (audio, init_diagnostics) =
+        capture_stream::CaptureStream::open(&capture_device, &capture_id, &wave_format)?;
+    *hub.capture_stages.lock().map_err(|e| e.to_string())? = init_diagnostics.clone();
     let mmcss = crate::windows_audio::Mmcss::enter();
     hub.capture_ready.store(true, Ordering::Release);
     hub.state.lock().map_err(|e| e.to_string())?.output_name = Some(output.get_friendlyname()?);
@@ -198,10 +185,10 @@ fn capture_endpoint(stop: &AtomicBool, hub: &Hub, timeline: &mut (u64, i64)) -> 
             }
             // Read one engine packet, then publish all complete network blocks.
             // Another ready engine packet is drained below without sleeping.
-            if capture.get_next_packet_size()?.unwrap_or(0) > 0 {
+            if audio.get_next_packet_size()?.unwrap_or(0) > 0 {
                 let read_started = Instant::now();
                 let previous = pcm.len();
-                let info = capture.read_from_device_to_deque(&mut pcm)?;
+                let info = audio.read_from_device_to_deque(&mut pcm)?;
                 discontinuities += u64::from(info.flags.data_discontinuity);
                 timestamp_errors += u64::from(info.flags.timestamp_error);
                 max_queue_frames = max_queue_frames.max(pcm.len() / align);
@@ -321,11 +308,14 @@ fn capture_endpoint(stop: &AtomicBool, hub: &Hub, timeline: &mut (u64, i64)) -> 
             pack_work.add_ns(packing_started.elapsed().as_nanos() as u64);
             if reported.elapsed() >= Duration::from_millis(500) {
                 *hub.capture_stages.lock().map_err(|e| e.to_string())? = json!({
-                    "engine": engine,
-                    "sharedPeriodProbe240": period_probe_240,
-                    "sharedPeriodProbe128": period_probe_128,
-                    "wasapiBufferFrames": buffer_frames,
-                    "wasapiBufferMs":buffer_frames as f64 / 48.,"requestedBufferMs":20,
+                    "initPath":init_diagnostics["initPath"],
+                    "requestedPeriodFrames":init_diagnostics["requestedPeriodFrames"],
+                    "requestedPeriodMs":init_diagnostics["requestedPeriodMs"],
+                    "fallbackReason":init_diagnostics["fallbackReason"],
+                    "engine":init_diagnostics["engine"],
+                    "wasapiBufferFrames":init_diagnostics["wasapiBufferFrames"],
+                    "wasapiBufferMs":init_diagnostics["wasapiBufferMs"],
+                    "requestedBufferMs":init_diagnostics["requestedBufferMs"],
                     "streamSampleRate":48000,"pcmBlockFrames":FRAMES,"pcmBlockBytes":block_bytes,
                     "queueFrames":pcm.len()/align,"maxQueueFrames":max_queue_frames,
                     "discontinuities":discontinuities,"timestampErrors":timestamp_errors,
@@ -361,9 +351,9 @@ fn capture_endpoint(stop: &AtomicBool, hub: &Hub, timeline: &mut (u64, i64)) -> 
             }
             // Capture wakes on the engine event and publishes complete 5 ms packets immediately.
             // The timeout only maintains silence/stop responsiveness when the endpoint is idle.
-            if capture.get_next_packet_size()?.unwrap_or(0) == 0 {
+            if audio.get_next_packet_size()?.unwrap_or(0) == 0 {
                 let waiting = Instant::now();
-                if event.wait_for_event(10).is_err() {
+                if !audio.wait(10) {
                     event_timeouts += 1;
                 }
                 event_wait.add_ns(waiting.elapsed().as_nanos() as u64);
@@ -381,6 +371,7 @@ fn capture_endpoint(stop: &AtomicBool, hub: &Hub, timeline: &mut (u64, i64)) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wasapi::StreamMode;
     #[test]
     #[ignore = "requires a Windows audio endpoint playing system sound"]
     fn capture_timestamp_probe() -> Res<()> {

@@ -608,6 +608,68 @@ legend {
 .diagnostic-block h3 {
   font-size: 14px;
 }
+.diagnostic-health {
+  border-top: 0;
+}
+.health-receiver h4 {
+  margin: 18px 0 10px;
+  overflow-wrap: anywhere;
+}
+.health-card {
+  border: 1px solid #d8e0da;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.health-card p {
+  margin: 6px 0 0;
+}
+.health-warning {
+  background: #fff6ec;
+  border-color: #e8cda9;
+}
+.health-summary {
+  padding: 12px;
+  height: 7em;
+  overflow: hidden;
+}
+.health-summary strong {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.health-summary p {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.health-details {
+  border-top: 1px solid #d8e0da;
+}
+.health-details > summary {
+  cursor: pointer;
+  padding: 10px 12px;
+}
+.health-details > summary:focus-visible {
+  outline: 2px solid #356d5d;
+  outline-offset: -3px;
+  border-radius: 6px;
+}
+.health-details-content {
+  padding: 0 12px 12px;
+}
+.health-explanation {
+  margin: 12px 0;
+}
+.health-ok {
+  background: #f0f5ee;
+}
+.health-advice {
+  color: #485b50;
+}
 .diagnostic-block dl {
   display: grid;
   grid-template-columns: minmax(100px, 1fr) minmax(100px, 1.3fr);

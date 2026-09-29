@@ -10,6 +10,7 @@ import { Icon } from "./components/Icon";
 import { Panel } from "./components/Panel";
 import { SpeakerTest } from "./components/SpeakerTest";
 import { useRoomWaveState } from "./hooks/useRoomWaveState";
+import { useReceiverHealth } from "./hooks/useReceiverHealth";
 import { setLocalOutput } from "./services/tauri";
 
 import type { LocalConfig } from "./types/roomwave";
@@ -17,6 +18,7 @@ import type { LocalConfig } from "./types/roomwave";
 function App() {
   const { virtualAudio, logState, setLogState, snapshot, audio, loaded, error, busy, action } =
     useRoomWaveState();
+  const health = useReceiverHealth(audio);
 
   const [panel, setPanel] = React.useState<"settings" | "diagnostics" | null>(null);
 
@@ -211,6 +213,7 @@ function App() {
             />
           ) : (
             <DiagnosticsPanel
+              health={health}
               audio={audio}
               snapshot={snapshot}
               virtualAudio={virtualAudio}

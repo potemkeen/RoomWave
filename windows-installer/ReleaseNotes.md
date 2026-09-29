@@ -1,10 +1,11 @@
-RoomWave Windows Host 0.1.3. The Android APK is released separately.
+RoomWave Windows Host 0.1.4. Compatible with the current Android 0.1.2 release; no Android update is required.
 
-- Settings and Diagnostics dialogs now block scrolling of the main window while retaining their own scrolling.
-- Settings close automatically after a successful save; failed saves keep the dialog open.
-- Minimum playout budget reduced to 30 ms. Adaptive device/group budgets can still raise actual latency; this is not a promise of 30 ms playback.
-- Added WASAPI shared-period diagnostic probes. Production capture is unchanged.
-- Internal host/UI refactoring and updated documentation.
+- Diagnostics now explains recurring network, audio-output and synchronization issues for each phone, using recent observations rather than lifetime counters or isolated spikes.
+- One stable-height summary per phone, with explanations, recommendations and raw metrics directly underneath in a collapsed section. Expanded sections stay open when metrics refresh.
+- Group-delay attribution is explicitly an estimate; missing or stale data is shown as insufficient for assessment.
+- Capture attempts IAudioClient3 at 240 frames / 5 ms, with automatic fallback to the previous shared-event path. Diagnostics reports the selected path, actual period/buffer and fallback reason.
+- On the tested VB-CABLE loopback endpoint, Windows rejects the low-period loopback flags and the existing 10 ms capture period remains in use. This release does not claim reduced capture latency on that endpoint.
+- Added automated frontend health-classification tests to the release workflow.
 
 Detailed session logging remains opt-in in Diagnostics.
 

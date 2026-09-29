@@ -52,6 +52,15 @@ export function metric(source: unknown, ...path: string[]): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+export function metricText(source: unknown, ...path: string[]): string | null {
+  let value = source;
+  for (const key of path) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    value = (value as Record<string, unknown>)[key];
+  }
+  return typeof value === "string" ? value : null;
+}
+
 export const stateLabel = (state: string) =>
   ({
     synced: "Синхронизировано",

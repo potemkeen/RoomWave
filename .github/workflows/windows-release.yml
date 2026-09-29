@@ -56,6 +56,12 @@ jobs:
       - name: Test host (hardware tests remain opt-in)
         working-directory: windows-host/src-tauri
         run: cargo test --locked
+      - name: Test frontend diagnostics
+        working-directory: windows-host
+        run: npm test
+      - name: Check frontend formatting
+        working-directory: windows-host
+        run: npm run format:check
       - name: Download verified installer dependencies
         run: ./windows-installer/Prepare-BuildTools.ps1
       - name: Build installer

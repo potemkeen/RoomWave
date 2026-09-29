@@ -7,8 +7,10 @@ import {
 } from "../services/tauri";
 
 import { MetricRows } from "./MetricRows";
+import { DiagnosticsHealth } from "./DiagnosticsHealth";
+import type { ReceiverHealth } from "../lib/diagnosticsHealth";
 
-import { formatCount, formatMs, metric, stateLabel } from "../lib/ui";
+import { formatCount, formatMs, metric, metricText, stateLabel } from "../lib/ui";
 
 import type {
   Action,
@@ -19,6 +21,7 @@ import type {
 } from "../types/roomwave";
 
 interface DiagnosticsPanelProps {
+  health: ReceiverHealth[];
   audio: AudioState;
   snapshot: DiscoverySnapshot;
   virtualAudio: VirtualAudio | null;
@@ -34,6 +37,7 @@ interface DiagnosticsPanelProps {
 }
 
 export function DiagnosticsPanel({
+  health,
   audio,
   snapshot,
   virtualAudio,
@@ -49,6 +53,18 @@ export function DiagnosticsPanel({
 
   return (
     <>
+      <DiagnosticsHealth
+        receivers={health}
+        states={audio.receivers}
+        hostError={Boolean(
+          error ||
+          snapshot.error ||
+          audio.captureError ||
+          audio.layout.error ||
+          audio.localOutput.error ||
+          virtualAudio?.error,
+        )}
+      />
       <section className="diagnostic-block">
         <h3>Аудиодрайвер</h3>
 
@@ -172,8 +188,24 @@ export function DiagnosticsPanel({
           <MetricRows
             rows={[
               [
+                "Инициализация захвата",
+                metricText(audio.hostMetrics, "captureStages", "initPath") ?? "—",
+              ],
+              [
+                "Запрошенный период",
+                `${formatCount(metric(audio.hostMetrics, "captureStages", "requestedPeriodFrames"))} кадров / ${formatMs(metric(audio.hostMetrics, "captureStages", "requestedPeriodMs"))}`,
+              ],
+              [
                 "Период захвата Windows",
-                formatMs(metric(audio.hostMetrics, "captureStages", "engine", "currentPeriodMs")),
+                `${formatCount(metric(audio.hostMetrics, "captureStages", "engine", "currentPeriodFrames"))} кадров / ${formatMs(metric(audio.hostMetrics, "captureStages", "engine", "currentPeriodMs"))}`,
+              ],
+              [
+                "Буфер захвата WASAPI",
+                `${formatCount(metric(audio.hostMetrics, "captureStages", "wasapiBufferFrames"))} кадров / ${formatMs(metric(audio.hostMetrics, "captureStages", "wasapiBufferMs"))}`,
+              ],
+              [
+                "Причина резервного режима",
+                metricText(audio.hostMetrics, "captureStages", "fallbackReason") ?? "—",
               ],
               [
                 "Чтение → передача, p95",
@@ -188,38 +220,6 @@ export function DiagnosticsPanel({
 
           <p className="help">p95 — время, в которое укладываются 95% блоков.</p>
         </section>
-      )}
-
-      {audio.receivers.map((receiver) => (
-        <section className="diagnostic-block" key={receiver.deviceId}>
-          <h3>{receiver.deviceName}</h3>
-
-          <MetricRows
-            rows={[
-              ["Соединение", receiver.error ? "Ошибка" : stateLabel(receiver.status)],
-              ["Синхронизация", stateLabel(receiver.syncStatus)],
-              ["Задержка", formatMs(receiver.latencyMs)],
-              ["Сеть (RTT)", formatMs(receiver.rttMs)],
-              ["Колебания задержки сети", formatMs(metric(receiver.stages, "jitterMs"))],
-              ["Отклонение синхронизации", formatMs(receiver.syncErrorMs)],
-              ["Буфер перед воспроизведением", formatMs(metric(receiver.stages, "jitterBufferMs"))],
-              ["Буфер аудиовывода", formatMs(metric(receiver.stages, "audioOutputMs"))],
-              ["Пропущено пакетов", formatCount(receiver.receiverLost)],
-              ["Опоздало пакетов", formatCount(metric(receiver.stages, "latePackets"))],
-              ["Нехватка данных для вывода", formatCount(metric(receiver.stages, "underruns"))],
-            ]}
-          />
-
-          <p className="help">
-            Счётчики — с начала подключения. Отсутствующие данные обозначены «—».
-          </p>
-
-          {receiver.error && <pre className="error-detail">{receiver.error}</pre>}
-        </section>
-      ))}
-
-      {audio.receivers.length === 0 && (
-        <p className="help">Метрики телефонов появятся после подключения.</p>
       )}
     </>
   );
